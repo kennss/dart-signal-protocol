@@ -362,4 +362,4 @@ SnowChat application is private, but the Signal Protocol
 implementation is being released here as open source so that other
 Flutter and Dart developers can benefit from it.
 
-For more about SnowChat, visit https://calidalab.com.
+For more about SnowChat, contact kennt@calidalab.ai
