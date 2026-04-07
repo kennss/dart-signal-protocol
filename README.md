@@ -2,7 +2,7 @@
 
 > **Pure Dart implementation of the Signal Protocol with zero native dependencies.**
 >
-> Extracted from the [SnowChat](https://calidalab.com) messenger project.
+> Extracted from the [SnowChat](mailto:kennt@calidalab.ai) messenger project.
 
 [![Pub Version](https://img.shields.io/badge/pub-0.1.0--alpha.1-orange.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -14,7 +14,7 @@ Double Ratchet messaging, and Sender Key group messaging. It has **no
 Platform Channel, no native binaries, no JNI/Swift bridge** — it runs
 the same code on iOS, Android, Web, Desktop, and Dart server.
 
-This library was extracted from the [SnowChat](https://calidalab.com)
+This library was extracted from the [SnowChat](mailto:kennt@calidalab.ai)
 messenger project, where it powers end-to-end encryption for both 1:1
 and group conversations (up to 1024 members). It is being released as
 an open-source library so that other Flutter and Dart developers can
