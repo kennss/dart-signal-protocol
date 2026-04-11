@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-03-30
+/// @lastUpdated 2026-04-12
 ///
 /// @functions
 ///  - EncryptedMessage: 암호화된 메시지 데이터 클래스 (암호문 + 래칫 키 + 메시지 번호)
@@ -272,11 +272,17 @@ class DoubleRatchetSession {
     // 2. If the ratchet public key changed, perform a DH ratchet step
     if (remoteRatchetKey == null ||
         !_bytesEqual(message.ratchetPublicKey, remoteRatchetKey!)) {
-      // Skip any remaining messages in the current receiving chain
-      _skipMessageKeys(
-        message.ratchetPublicKey,
-        message.previousChainLength,
-      );
+      // Skip any remaining messages in the current receiving chain.
+      // C-1 FIX: Use the OLD remoteRatchetKey (not the new one from the message)
+      // so that skipped keys are stored under the correct ratchet public key.
+      // Out-of-order messages from the previous chain carry the old ratchet key
+      // in their header, so lookup must match.
+      if (remoteRatchetKey != null) {
+        _skipMessageKeys(
+          remoteRatchetKey!,
+          message.previousChainLength,
+        );
+      }
 
       // DH Ratchet step
       _dhRatchet(message.ratchetPublicKey);

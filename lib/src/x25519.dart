@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-04-03
+/// @lastUpdated 2026-04-12
 ///
 /// @functions
 ///  - X25519KeyPair: X25519 키쌍 데이터 클래스
@@ -86,6 +86,11 @@ Uint8List ed25519PrivateKeyToX25519(Uint8List ed25519PrivateSeed) {
     ...signingKey.verifyKey.toList(),
   ]);
   final out = Uint8List(32);
-  TweetNaClExt.crypto_sign_ed25519_sk_to_x25519_sk(out, fullKey);
-  return out;
+  try {
+    TweetNaClExt.crypto_sign_ed25519_sk_to_x25519_sk(out, fullKey);
+    return out;
+  } finally {
+    // H-2 FIX: Zeroize sensitive expanded key material immediately after use.
+    fullKey.fillRange(0, fullKey.length, 0x00);
+  }
 }

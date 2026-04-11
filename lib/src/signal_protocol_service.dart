@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-29
-/// @lastUpdated 2026-03-30
+/// @lastUpdated 2026-04-12
 ///
 /// @functions
 ///  - SignalProtocolService: Signal Protocol 순수 Dart 구현 클래스
@@ -269,28 +269,29 @@ class SignalProtocolService {
     final remoteSignedPreKey = signedPreKeyData['publicKey'] as Uint8List;
     final signedPreKeySignature = signedPreKeyData['signature'] as Uint8List;
 
-    // Verify signed prekey signature when Ed25519 identity key is available.
-    // Without verification, a MITM can inject a fake signed prekey.
-    // TODO: Server must include identityKeyEd25519 in prekey bundle for full security.
+    // H-1 FIX: Fail-closed — Ed25519 identity key is REQUIRED for signed
+    // prekey signature verification. Without it, a MITM can inject a fake
+    // signed prekey undetected (fail-open vulnerability).
     final remoteIdentityKeyEd25519 =
         preKeyBundle['identityKeyEd25519'] as Uint8List?;
-    if (remoteIdentityKeyEd25519 != null) {
-      final bundle = PreKeyBundle(
-        identityKey: remoteIdentityKey,
-        signedPreKey: remoteSignedPreKey,
-        signedPreKeySignature: signedPreKeySignature,
-        signedPreKeyId: signedPreKeyData['keyId'] as int,
-        registrationId: preKeyBundle['registrationId'] as int? ?? 0,
+    if (remoteIdentityKeyEd25519 == null) {
+      throw SignalProtocolException(
+        'PreKey bundle missing Ed25519 identity key — '
+        'cannot verify signed prekey signature for $sessionKey. '
+        'Refusing session to prevent MITM attack.',
       );
-      if (!bundle.verifySignature(remoteIdentityKeyEd25519)) {
-        throw SignalProtocolException(
-          'Signed prekey signature verification failed for $sessionKey',
-        );
-      }
-    } else {
-      debugPrint('[SignalProtocol] WARNING: PreKey bundle missing Ed25519 key '
-          '— signed prekey verification skipped for $sessionKey. '
-          'Server should include identityKeyEd25519 for MITM protection.');
+    }
+    final bundle = PreKeyBundle(
+      identityKey: remoteIdentityKey,
+      signedPreKey: remoteSignedPreKey,
+      signedPreKeySignature: signedPreKeySignature,
+      signedPreKeyId: signedPreKeyData['keyId'] as int,
+      registrationId: preKeyBundle['registrationId'] as int? ?? 0,
+    );
+    if (!bundle.verifySignature(remoteIdentityKeyEd25519)) {
+      throw SignalProtocolException(
+        'Signed prekey signature verification failed for $sessionKey',
+      );
     }
 
     // Extract optional one-time prekey

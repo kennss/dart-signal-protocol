@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-03-30
+/// @lastUpdated 2026-04-12
 ///
 /// @functions
 ///  - SenderKeyState: Sender Key 상태 (체인 키, 반복 횟수, 서명 키)
@@ -49,6 +49,10 @@ const int maxForwardRatchetSteps = 25000;
 /// Allows decrypting messages encrypted with previous keys during
 /// key rotation transitions.
 const int maxSenderKeyStates = 5;
+
+/// Maximum number of cached message keys per SenderKeyState.
+/// Prevents unbounded memory growth from out-of-order message gaps.
+const int maxCachedMessageKeys = 2000;
 
 final _rng = Random.secure();
 
@@ -481,10 +485,15 @@ class SenderKeyManager {
           );
         }
 
-        // Cache intermediate keys for out-of-order messages
+        // Cache intermediate keys for out-of-order messages.
+        // H-3 FIX: Enforce size cap to prevent unbounded memory growth.
         while (state.iteration < messageIteration) {
           state.cachedMessageKeys[state.iteration] = state.deriveMessageKey();
           state.ratchet();
+          // Evict oldest cached keys when cap is exceeded
+          while (state.cachedMessageKeys.length > maxCachedMessageKeys) {
+            state.cachedMessageKeys.remove(state.cachedMessageKeys.keys.first);
+          }
         }
 
         // Derive message key and decrypt
@@ -509,14 +518,17 @@ class SenderKeyManager {
   ///
   /// Creates a completely new sender key that must be redistributed
   /// to all remaining members via 1:1 E2EE.
+  /// M-2 FIX: Previous states are KEPT (up to maxSenderKeyStates) so that
+  /// in-flight messages encrypted with the old key can still be decrypted.
+  /// createSenderKey() → addState() handles the cap automatically.
   SenderKeyDistributionMessage rotateSenderKey(
     String groupId,
     String myId,
   ) {
-    // Remove old key and create a fresh one
-    _senderKeys.remove('$groupId:$myId');
     // Increment rotation version so Tracker knows to re-distribute
     _rotationVersions[groupId] = (_rotationVersions[groupId] ?? 0) + 1;
+    // createSenderKey() calls addState() which keeps previous states
+    // (up to maxSenderKeyStates) — no need to remove the old record.
     return createSenderKey(groupId, myId);
   }
 
