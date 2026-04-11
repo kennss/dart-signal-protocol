@@ -5,7 +5,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-07
-/// @lastUpdated 2026-04-07
+/// @lastUpdated 2026-04-12
 
 library dart_signal_protocol;
 
@@ -25,6 +25,10 @@ export 'src/message_send_log.dart';
 
 // File encryption (XSalsa20-Poly1305)
 export 'src/file_encryptor.dart';
+
+// Sealed Sender (sender anonymity)
+export 'src/sender_certificate.dart';
+export 'src/sealed_sender.dart';
 
 // High-level orchestrator
 export 'src/signal_protocol_service.dart';

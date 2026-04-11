@@ -96,7 +96,8 @@ every platform Flutter supports, with zero build complexity.
 | File encryption (XSalsa20-Poly1305) | ✅ |
 | Small-subgroup attack mitigation | ✅ all-zero DH check |
 | Optional debug logging | ✅ user-provided callback |
-| Sealed Sender | ❌ not implemented |
+| Sealed Sender | ✅ ephemeral DH + HKDF + XSalsa20-Poly1305, replay cache |
+| Sender Certificate (Ed25519 server-signed) | ✅ 177-byte fixed format |
 | PNI (Phone Number Identity) | ❌ not implemented |
 | ZKGroup credentials | ❌ not implemented |
 | Wire format compatibility with libsignal | ❌ not verified |
@@ -193,11 +194,13 @@ lib/
     ├── sender_key_tracker.dart  # SKDM distribution tracker
     ├── message_send_log.dart    # 24-hour retry log
     ├── file_encryptor.dart      # File body encryption
+    ├── sealed_sender.dart       # Sealed Sender (sender anonymity)
+    ├── sender_certificate.dart  # Ed25519 server-signed sender certificate
     ├── signal_protocol_service.dart  # high-level orchestrator
     └── logger.dart              # optional debug logging facade
 ```
 
-Total: ~3,400 lines of Dart code.
+Total: ~4,000 lines of Dart code.
 
 ---
 
@@ -229,6 +232,10 @@ Dart projects (e.g., a Dart server, command-line tool, or test).
   AEAD binding, signed prekey verification, all-zero DH rejection.
 - **Group messaging extensions**: Multi-State SenderKeyRecord
   (5 generations), out-of-order cache, chain_id, distribution tracker.
+- **Sealed Sender**: sender anonymity via ephemeral X25519 DH with
+  HKDF key derivation, XSalsa20-Poly1305 encryption, replay cache
+  (10K entries, 24h TTL), random padding, and Ed25519 server-signed
+  sender certificates.
 
 ### Not implemented
 
@@ -237,7 +244,6 @@ Dart projects (e.g., a Dart server, command-line tool, or test).
   sender key store.
 - **Networking**: prekey bundle fetch, message delivery, etc., must
   be handled externally.
-- **Sealed Sender**: Signal's sender anonymity feature.
 - **PNI (Phone Number Identity)**: Signal's phone-number-decoupled
   identity system.
 - **ZKGroup**: zero-knowledge group credentials.
@@ -258,10 +264,10 @@ other SnowChat-specific infrastructure.
 | **Language** | Pure Dart | Rust + bindings |
 | **Native dependencies** | None | JNI / Swift / Node bindings |
 | **Flutter Web support** | ✅ | ❌ |
-| **Lines of code** | ~3,400 | ~80,000 |
+| **Lines of code** | ~4,000 | ~80,000 |
 | **External audit** | ❌ | ✅ multiple |
 | **Production users** | 1 (alpha) | ~2 billion |
-| **Sealed Sender** | ❌ | ✅ |
+| **Sealed Sender** | ✅ | ✅ |
 | **PNI** | ❌ | ✅ |
 | **ZKGroup** | ❌ | ✅ |
 | **Multi-State SenderKey** | ✅ | ❌ |
@@ -342,11 +348,11 @@ This library is built on the shoulders of:
 ## Status & roadmap
 
 - [x] Initial extraction from SnowChat (`0.1.0-alpha.1`)
+- [x] Sealed Sender support (`0.2.0-alpha`)
 - [ ] Unit test coverage > 80%
 - [ ] Wire format compatibility tests vs libsignal
 - [ ] External security audit
 - [ ] pub.dev publication (`0.1.0-beta`)
-- [ ] Sealed Sender support
 - [ ] Stable `1.0.0` release
 
 There is no fixed timeline. Progress depends on community interest

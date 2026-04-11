@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha] - 2026-04-12
+
+### Added
+
+#### Sealed Sender (sender anonymity)
+- `sealed_sender.dart` -- Core Sealed Sender cryptographic service.
+  - `SealedSenderService.seal()`: Wraps a DR/SK ciphertext in an anonymous
+    envelope using ephemeral X25519 DH with the recipient's identity key,
+    HKDF key derivation, and XSalsa20-Poly1305 AEAD encryption. Includes
+    random padding (64-byte aligned, 512-byte minimum) to resist traffic
+    analysis.
+  - `SealedSenderService.unseal()`: Decrypts the envelope, verifies the
+    sender certificate (Ed25519 signature + expiry), performs replay
+    detection (EK_seal-based LRU cache, 10K entries, 24h TTL), and
+    validates timestamp window (24h).
+  - `UnsealedMessage`: Result data class containing sender identity,
+    message context, timestamp, and inner DR ciphertext.
+  - Defense-in-depth: ephemeral private keys zeroed after use, DH results
+    zeroed after HKDF derivation, OKM zeroed after key extraction.
+
+- `sender_certificate.dart` -- Server-signed sender certificate.
+  - `SenderCertificate`: 177-byte fixed-size binary format binding
+    SnowChat ID, device UUID, X25519 identity key, and expiry with an
+    Ed25519 server signature.
+  - `SenderCertificate.toBytes()` / `SenderCertificate.fromBytes()`:
+    Deterministic serialization/deserialization.
+  - `SenderCertificate.verify()`: Version check + expiry check + Ed25519
+    signature verification against server's verify key.
+
+### Security notes
+
+- Sealed Sender error messages are intentionally uniform ("Sealed message
+  rejected") to prevent oracle attacks that could distinguish between
+  decryption failure, certificate failure, or replay detection.
+- Replay protection operates at two levels: EK_seal uniqueness check
+  (before DH computation to save CPU on replays) and timestamp window
+  validation (24-hour tolerance).
+- Inner payload padding uses CSPRNG random bytes (not zeros) to resist
+  compression-based side channels.
+
+---
+
 ## [0.1.0-alpha.1] - 2026-04-07
 
 ### Added
