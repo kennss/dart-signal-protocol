@@ -3,7 +3,7 @@
 > **The most complete Pure Dart implementation of the Signal Protocol — X3DH, Double Ratchet, Sender Key, and Sealed Sender — with zero native dependencies.**
 
 [![Pub Version](https://img.shields.io/badge/pub-0.2.0--alpha-orange.svg)](#)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20Android%20%7C%20Web%20%7C%20Desktop-blue.svg)](#)
 
 `dart_signal_protocol` delivers the **full Signal Protocol stack in Pure Dart**: X3DH key agreement, Double Ratchet messaging, Sender Key group encryption, and **Sealed Sender** (sender anonymity). No Platform Channels, no native binaries, no JNI/Swift bridges — one codebase that runs identically on iOS, Android, Web, Desktop, and Dart servers.
@@ -45,11 +45,11 @@ Every other path to Signal Protocol in Flutter is painful:
 |----------|---------|
 | Platform Channels + libsignal (Rust/C) | JNI for Android, Swift bridge for iOS, no Flutter Web |
 | FFI wrapper (e.g., libsignal_dart) | Requires Rust toolchain per platform, heavy builds |
-| MixinNetwork/libsignal_protocol_dart | GPL-3.0, no Sealed Sender, inactive since 2025 |
+| MixinNetwork/libsignal_protocol_dart | No Sealed Sender, inactive since 2025 |
 | Roll your own | Months of work, high risk of cryptographic bugs |
 | Weaker E2EE scheme | No forward secrecy, no post-compromise security |
 
-**`dart_signal_protocol` is the only option that gives you the full Signal Protocol stack — including Sealed Sender — in Pure Dart, with an MIT license, and one dependency.**
+**`dart_signal_protocol` is the only option that gives you the full Signal Protocol stack — including Sealed Sender — in Pure Dart, with one dependency.**
 
 ---
 
@@ -249,7 +249,7 @@ other SnowChat-specific infrastructure.
 | **Multi-State SenderKey** | ✅ | ❌ |
 | **Wire format compatibility** | Self only | libsignal canonical |
 
-**Key takeaway**: libsignal has the audit pedigree and 2 billion users. We have **Pure Dart, MIT license, Sealed Sender, and Multi-State SenderKey** — features that libsignal either doesn't offer or locks behind native bindings. Choose based on your constraints.
+**Key takeaway**: libsignal has the audit pedigree and 2 billion users. We have **Pure Dart, Sealed Sender, and Multi-State SenderKey** — features that libsignal either doesn't offer or locks behind native bindings. Both libraries are AGPL-3.0. Choose based on your constraints.
 
 ---
 
@@ -282,12 +282,18 @@ project maintained on a best-effort basis.
 
 ## License
 
-[MIT License](LICENSE).
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
-This library is released under the permissive MIT license to encourage
-adoption. The original SnowChat project from which this code was
-extracted uses the AGPL-3.0 license; this library is dual-licensed by
-the copyright holder (Calida Lab) under MIT for redistribution.
+Copyright (C) 2026 Kennt Kim, Calida Lab.
+
+This library is released under the AGPL-3.0 — the same license used by
+Signal's reference implementation (`libsignal`). The license applies
+the standard copyleft obligations of GPL-3.0, and additionally
+requires that users interacting with a modified version over a
+network be offered the corresponding source code (§13).
+
+If AGPL-3.0 is incompatible with your project, contact the copyright
+holder (kennt@calidalab.ai) about a commercial license.
 
 ---
 

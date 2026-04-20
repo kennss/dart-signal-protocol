@@ -192,7 +192,11 @@ Disagreements are fine. Personal attacks are not.
 ## License
 
 By contributing, you agree that your contributions will be licensed
-under the same [MIT License](LICENSE) that covers the project.
+under the same [GNU AGPL-3.0](LICENSE) that covers the project.
+
+If you need to contribute code that you are not able to license under
+AGPL-3.0 (for example, because your employer requires different
+terms), open an issue first to discuss before submitting a PR.
 
 ## Questions?
 
