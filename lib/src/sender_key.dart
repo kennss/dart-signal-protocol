@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-04-12
+/// @lastUpdated 2026-04-20 (backport: SKDM chainId wire field, origin SKDM cache, removeSenderKeyForMember, needsResave, cache-msgKey-before-ratchet)
 ///
 /// @functions
 ///  - SenderKeyState: Sender Key 상태 (체인 키, 반복 횟수, 서명 키)
@@ -20,6 +20,7 @@
 ///  - SenderKeyManager.encryptGroupMessage(): 그룹 메시지 암호화
 ///  - SenderKeyManager.decryptGroupMessage(): 그룹 메시지 복호화
 ///  - SenderKeyManager.rotateSenderKey(): Sender Key 교체 (멤버 제거 시)
+///  - SenderKeyManager.removeSenderKeyForMember(): 손상된 Sender Key 제거 (SKDM corrupt recovery)
 ///  - SenderKeyManager.toJson(): 전체 상태 직렬화
 ///  - SenderKeyManager.fromJson(): 전체 상태 역직렬화
 
@@ -28,10 +29,10 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:pinenacl/x25519.dart' as nacl_api;
-import 'logger.dart';
 import 'package:pinenacl/ed25519.dart' as ed;
 
 import 'hkdf.dart' show hmacSha256;
+import 'logger.dart';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -214,6 +215,12 @@ class SenderKeyRecord {
 class SenderKeyDistributionMessage {
   final String groupId;
   final String senderId;
+
+  /// 31-bit random chain generation identifier. Must match the wire chainId
+  /// encoded in group message envelopes so that the receiver can pick the
+  /// correct [SenderKeyState] when a sender rotates keys. Legacy SKDMs
+  /// (pre-chainId) deserialize as 0.
+  final int chainId;
   final int iteration;
   final Uint8List chainKey;
   final Uint8List signingKey;
@@ -221,6 +228,7 @@ class SenderKeyDistributionMessage {
   const SenderKeyDistributionMessage({
     required this.groupId,
     required this.senderId,
+    required this.chainId,
     required this.iteration,
     required this.chainKey,
     required this.signingKey,
@@ -231,6 +239,7 @@ class SenderKeyDistributionMessage {
     final json = {
       'groupId': groupId,
       'senderId': senderId,
+      'chainId': chainId,
       'iteration': iteration,
       'chainKey': _bytesToHex(chainKey),
       'signingKey': _bytesToHex(signingKey),
@@ -245,6 +254,8 @@ class SenderKeyDistributionMessage {
     return SenderKeyDistributionMessage(
       groupId: json['groupId'] as String,
       senderId: json['senderId'] as String,
+      // Legacy SKDMs (pre-chainId field) lack this field — fallback to 0.
+      chainId: (json['chainId'] as int?) ?? 0,
       iteration: json['iteration'] as int,
       chainKey: _hexToBytes(json['chainKey'] as String),
       signingKey: _hexToBytes(json['signingKey'] as String),
@@ -272,6 +283,11 @@ class SenderKeyManager {
   /// Used by SenderKeyDistributionTracker to detect key rotation.
   final Map<String, int> _rotationVersions;
 
+  /// Set `true` by [SenderKeyManager.fromJson] when at least one malformed
+  /// legacy entry was pruned during load. The caller (typically a session
+  /// store loader) should re-save immediately to clean the disk file.
+  bool needsResave = false;
+
   SenderKeyManager({
     Map<String, SenderKeyRecord>? senderKeys,
     Map<String, int>? rotationVersions,
@@ -290,6 +306,12 @@ class SenderKeyManager {
     String groupId,
     String myId,
   ) {
+    // Reject empty owner id at the producer so state cannot accidentally
+    // land at map key "$groupId:" (regression guard).
+    if (myId.isEmpty) {
+      throw ArgumentError(
+          'createSenderKey: myId must not be empty (group $groupId)');
+    }
     final chainKey = _randomBytes(32);
     final signingKey = ed.SigningKey.generate();
     final chainId = _rng.nextInt(0x7FFFFFFF); // 31-bit random
@@ -310,20 +332,45 @@ class SenderKeyManager {
       _senderKeys[key] = SenderKeyRecord(states: [state]);
     }
 
-    return SenderKeyDistributionMessage(
+    final skdm = SenderKeyDistributionMessage(
       groupId: groupId,
       senderId: myId,
+      chainId: chainId,
       iteration: 0,
-      chainKey: chainKey,
+      chainKey: Uint8List.fromList(chainKey),
       signingKey: Uint8List.fromList(signingKey.verifyKey.toList()),
     );
+
+    // Cache the origin SKDM (iter=0) for future getExistingSKDM() calls.
+    _originSKDMs[key] = skdm;
+
+    return skdm;
   }
 
-  /// Export current Sender Key state as SKDM (no key regeneration).
-  /// Unlike createSenderKey(), this reads the existing state without mutation.
-  /// Recipients receiving this SKDM can decrypt messages from current iteration onward.
+  /// Origin SKDM cache: stores the SKDM at iter=0 from createSenderKey().
+  /// [getExistingSKDM] returns this instead of the advanced chain state so
+  /// that receivers can decrypt messages from iteration 0 onward. Without
+  /// this, a receiver getting an SKDM after messages were already sent would
+  /// receive an advanced SKDM (iter=N) and fail to decrypt iter<N messages.
+  final Map<String, SenderKeyDistributionMessage> _originSKDMs = {};
+
+  /// Export the origin SKDM for distribution to group members.
+  ///
+  /// Returns the iter=0 snapshot captured during [createSenderKey], NOT the
+  /// current advanced chain state. This ensures receivers can decrypt all
+  /// messages from the beginning of this chain generation.
   SenderKeyDistributionMessage getExistingSKDM(String groupId, String myId) {
+    if (myId.isEmpty) {
+      throw ArgumentError(
+          'getExistingSKDM: myId must not be empty (group $groupId)');
+    }
     final key = '$groupId:$myId';
+
+    // Return origin SKDM if available (preferred — covers iter=0 onward).
+    final origin = _originSKDMs[key];
+    if (origin != null) return origin;
+
+    // Fallback: read current state (legacy path, before origin cache existed).
     final record = _senderKeys[key];
     if (record == null || record.isEmpty) {
       throw StateError(
@@ -333,6 +380,7 @@ class SenderKeyManager {
     return SenderKeyDistributionMessage(
       groupId: groupId,
       senderId: myId,
+      chainId: state.chainId,
       iteration: state.iteration,
       chainKey: Uint8List.fromList(state.chainKey),
       signingKey: Uint8List.fromList(state.signingKeyPublic),
@@ -340,10 +388,24 @@ class SenderKeyManager {
   }
 
   /// Process a received sender key distribution message from another member.
-  /// Rejects SKDM with older iteration (replay protection).
+  ///
+  /// Replay protection: rejects duplicate SKDMs within the same chain
+  /// generation. A new [chainId] triggers an unconditional state replacement
+  /// to support key rotation.
   void processSenderKey(SenderKeyDistributionMessage message) {
+    // Reject SKDMs from peers running a buggy build that distributed an
+    // empty senderId. Without this guard we would accept garbage entries.
+    if (message.senderId.isEmpty) {
+      debugPrint('[SenderKey] Rejecting SKDM with empty senderId '
+          '(group ${message.groupId})');
+      return;
+    }
     final key = '${message.groupId}:${message.senderId}';
     final newState = SenderKeyState(
+      // Propagate chainId from SKDM so receiver state matches the wire
+      // chainId emitted by the sender. Without this, legacy SKDMs default
+      // to 0 → mismatch → permanent decrypt failure.
+      chainId: message.chainId,
       iteration: message.iteration,
       chainKey: Uint8List.fromList(message.chainKey),
       signingKeyPublic: Uint8List.fromList(message.signingKey),
@@ -352,11 +414,29 @@ class SenderKeyManager {
 
     final record = _senderKeys[key];
     if (record != null) {
-      // Replay protection: reject older iteration
-      if (record.current.iteration > message.iteration) {
-        debugPrint('[SenderKey] Rejecting SKDM replay: '
-            'incoming iter=${message.iteration} < current=${record.current.iteration}');
+      // Replay protection only applies WITHIN the same chain generation. A
+      // different chainId means the sender rotated (or we are migrating from
+      // a legacy chainId=0 state to a real one) — accept unconditionally so
+      // stale chainId=0 records cannot block new SKDMs forever.
+      if (record.current.chainId == message.chainId) {
+        // Same chainId == we already have this exact generation. Adding a
+        // duplicate state with empty cachedMessageKeys would shadow the
+        // populated older one (decrypt iterates newest→oldest) and break
+        // out-of-order messages. Drop duplicates unconditionally.
+        debugPrint('[SenderKey] Ignoring duplicate SKDM (same chainId '
+            '${message.chainId}): incoming iter=${message.iteration}, '
+            'current iter=${record.current.iteration}');
         return;
+      } else {
+        debugPrint('[SenderKey] chainId rotation detected '
+            'old=${record.current.chainId} new=${message.chainId} '
+            '— replacing record (legacy migration / sender key rotation)');
+        // Drop legacy chainId=0 entries entirely so the decrypt loop does
+        // not waste time trying them. Real rotations (both chainIds
+        // non-zero) keep history for in-flight messages.
+        if (record.current.chainId == 0) {
+          record.states.clear();
+        }
       }
       record.addState(newState);
     } else {
@@ -366,13 +446,17 @@ class SenderKeyManager {
 
   /// Encrypt a message with our own sender key for the group.
   ///
-  /// Returns the ciphertext prefixed with the iteration number (4 bytes LE)
-  /// so recipients can align their chain ratchet.
+  /// Returns the wire bytes:
+  /// `[version(1)][chainId(4 BE)][iteration(4 BE)][sig(64)][ct]`
   Uint8List encryptGroupMessage(
     String groupId,
     String myId,
     Uint8List plaintext,
   ) {
+    if (myId.isEmpty) {
+      throw ArgumentError(
+          'encryptGroupMessage: myId must not be empty (group $groupId)');
+    }
     final key = '$groupId:$myId';
     final record = _senderKeys[key];
     if (record == null || record.isEmpty) {
@@ -453,7 +537,9 @@ class SenderKeyManager {
       throw ArgumentError('Invalid group message: too short (${data.length})');
     }
 
-    // Try each state generation (newest first)
+    // Try each state generation (newest first). Capture the last error so we
+    // can report what actually failed when all states are exhausted.
+    Object? lastError;
     for (final state in record.states) {
       try {
         // Verify signature with this state's key
@@ -463,13 +549,13 @@ class SenderKeyManager {
           message: ciphertext,
         );
 
-        // Signature matches this state — decrypt with it
-        // Check for out-of-order (past message)
+        // Signature matches this state — decrypt with it.
+        // Check for out-of-order (past message).
         if (messageIteration < state.iteration) {
-          // Try cached message key
+          // Try cached message key (kept on read for drift-retry safety;
+          // evicted by the 2000-cap, not by consume-on-use).
           final cachedKey = state.cachedMessageKeys[messageIteration];
           if (cachedKey != null) {
-            state.cachedMessageKeys.remove(messageIteration);
             return _decrypt(cachedKey, ciphertext);
           }
           throw StateError(
@@ -486,7 +572,6 @@ class SenderKeyManager {
         }
 
         // Cache intermediate keys for out-of-order messages.
-        // H-3 FIX: Enforce size cap to prevent unbounded memory growth.
         while (state.iteration < messageIteration) {
           state.cachedMessageKeys[state.iteration] = state.deriveMessageKey();
           state.ratchet();
@@ -500,35 +585,51 @@ class SenderKeyManager {
         final messageKey = state.deriveMessageKey();
         final plaintext = _decrypt(messageKey, ciphertext);
 
+        // Cache current message key BEFORE ratcheting (drift-retry safety).
+        // If the caller's durable INSERT fails after this decrypt returns,
+        // the retry attempt hits the "messageIteration < state.iteration"
+        // branch and finds this cached key instead of throwing "no cached
+        // key".
+        state.cachedMessageKeys[state.iteration] =
+            Uint8List.fromList(messageKey);
+        while (state.cachedMessageKeys.length > maxCachedMessageKeys) {
+          state.cachedMessageKeys.remove(state.cachedMessageKeys.keys.first);
+        }
+
         // Advance chain past this message
         state.ratchet();
         return plaintext;
-      } catch (_) {
+      } catch (e) {
+        lastError = e;
         continue; // Try next state generation
       }
     }
 
     throw StateError(
       'Failed to decrypt group message from $senderId in $groupId '
-      'with any of ${record.states.length} key states.',
+      'with any of ${record.states.length} key states. '
+      'Message wire iter=$messageIteration chainId=$messageChainId. '
+      'Last error: $lastError',
     );
   }
 
   /// Rotate the sender key for a group (called when a member is removed).
   ///
-  /// Creates a completely new sender key that must be redistributed
-  /// to all remaining members via 1:1 E2EE.
-  /// M-2 FIX: Previous states are KEPT (up to maxSenderKeyStates) so that
-  /// in-flight messages encrypted with the old key can still be decrypted.
-  /// createSenderKey() → addState() handles the cap automatically.
+  /// Creates a completely new sender key that must be redistributed to all
+  /// remaining members via 1:1 E2EE. Previous states are KEPT (up to
+  /// [maxSenderKeyStates]) so in-flight messages encrypted with the old key
+  /// can still be decrypted; [createSenderKey] → [SenderKeyRecord.addState]
+  /// handles the cap automatically.
   SenderKeyDistributionMessage rotateSenderKey(
     String groupId,
     String myId,
   ) {
+    if (myId.isEmpty) {
+      throw ArgumentError(
+          'rotateSenderKey: myId must not be empty (group $groupId)');
+    }
     // Increment rotation version so Tracker knows to re-distribute
     _rotationVersions[groupId] = (_rotationVersions[groupId] ?? 0) + 1;
-    // createSenderKey() calls addState() which keeps previous states
-    // (up to maxSenderKeyStates) — no need to remove the old record.
     return createSenderKey(groupId, myId);
   }
 
@@ -537,6 +638,25 @@ class SenderKeyManager {
     _senderKeys.removeWhere(
       (key, _) => key.startsWith('$groupId:'),
     );
+    // Clean associated caches: origin SKDMs + rotation version
+    _originSKDMs.removeWhere(
+      (key, _) => key.startsWith('$groupId:'),
+    );
+    _rotationVersions.remove(groupId);
+  }
+
+  /// Remove the corrupt sender key for a specific member in a group.
+  ///
+  /// Called when we hold an SKDM for the sender but decryption still fails
+  /// (ratchet desync, state corruption, etc.). After removal, a fresh SKDM
+  /// request is typically sent and the message is parked until the new SKDM
+  /// arrives. This breaks the permanent decrypt failure loop where a stale
+  /// or corrupt state blocks all future messages from the sender.
+  void removeSenderKeyForMember(String groupId, String senderId) {
+    final key = '$groupId:$senderId';
+    final removed = _senderKeys.remove(key);
+    debugPrint('[SenderKeyManager] removeSenderKeyForMember: $key '
+        '(removed=${removed != null})');
   }
 
   /// Check if we have a sender key for a specific member in a group.
@@ -552,27 +672,75 @@ class SenderKeyManager {
       map[entry.key] = entry.value.toJson();
     }
     map['_rotationVersions'] = _rotationVersions;
+    // Persist origin SKDMs so getExistingSKDM() survives app restart.
+    final originMap = <String, Map<String, dynamic>>{};
+    for (final entry in _originSKDMs.entries) {
+      originMap[entry.key] = {
+        'groupId': entry.value.groupId,
+        'senderId': entry.value.senderId,
+        'chainId': entry.value.chainId,
+        'iteration': entry.value.iteration,
+        'chainKey': base64Encode(entry.value.chainKey),
+        'signingKey': base64Encode(entry.value.signingKey),
+      };
+    }
+    map['_originSKDMs'] = originMap;
     return map;
   }
 
   /// Deserialize sender key state from JSON (auto-migrates legacy format).
+  ///
+  /// Drops malformed legacy entries whose key is `"<groupId>:"` (empty
+  /// senderId). When any entries are dropped, sets [needsResave] so the
+  /// caller can immediately persist a clean store.
   factory SenderKeyManager.fromJson(Map<String, dynamic> json) {
     final keys = <String, SenderKeyRecord>{};
     Map<String, int>? rotationVersions;
+    bool dropped = false;
     for (final entry in json.entries) {
       if (entry.key == '_rotationVersions') {
         rotationVersions = Map<String, int>.from(entry.value as Map);
-      } else {
-        // SenderKeyRecord.fromJson handles both legacy (single state)
-        // and new format (states array) automatically.
-        keys[entry.key] = SenderKeyRecord.fromJson(
-            entry.value as Map<String, dynamic>);
+        continue;
       }
+      // Skip origin SKDMs — deserialized separately below.
+      if (entry.key == '_originSKDMs') continue;
+      // Validate map key shape: must be "groupId:senderId" with non-empty
+      // senderId. Drop malformed entries silently (regression artifact).
+      final colonIdx = entry.key.indexOf(':');
+      if (colonIdx == -1 || colonIdx == entry.key.length - 1) {
+        debugPrint('[SenderKey] Dropping malformed key on load: '
+            '"${entry.key}" (empty senderId)');
+        dropped = true;
+        continue;
+      }
+      // SenderKeyRecord.fromJson handles both legacy (single state) and new
+      // format (states array) automatically.
+      keys[entry.key] = SenderKeyRecord.fromJson(
+          entry.value as Map<String, dynamic>);
     }
-    return SenderKeyManager(
+    final mgr = SenderKeyManager(
       senderKeys: keys,
       rotationVersions: rotationVersions,
     );
+    mgr.needsResave = dropped;
+
+    // Restore origin SKDMs
+    final originRaw = json['_originSKDMs'] as Map<String, dynamic>?;
+    if (originRaw != null) {
+      for (final entry in originRaw.entries) {
+        final v = entry.value as Map<String, dynamic>;
+        mgr._originSKDMs[entry.key] = SenderKeyDistributionMessage(
+          groupId: v['groupId'] as String,
+          senderId: v['senderId'] as String,
+          chainId: v['chainId'] as int,
+          iteration: v['iteration'] as int,
+          chainKey: base64Decode(v['chainKey'] as String),
+          signingKey: base64Decode(v['signingKey'] as String),
+        );
+      }
+    }
+
+    return mgr;
   }
 }
 
@@ -628,16 +796,7 @@ Uint8List _hexToBytes(String hex) {
   return bytes;
 }
 
-/// Encode a 32-bit integer as 4 little-endian bytes.
-Uint8List _int32ToLE(int value) {
-  return Uint8List(4)
-    ..[0] = value & 0xFF
-    ..[1] = (value >> 8) & 0xFF
-    ..[2] = (value >> 16) & 0xFF
-    ..[3] = (value >> 24) & 0xFF;
-}
-
-/// Decode 4 little-endian bytes to a 32-bit integer.
+/// Decode 4 little-endian bytes to a 32-bit integer (legacy v1 parsing).
 int _leToInt32(Uint8List bytes) {
   return bytes[0] |
       (bytes[1] << 8) |
