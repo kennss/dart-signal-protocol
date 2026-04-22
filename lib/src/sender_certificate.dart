@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-04-12
+/// @lastUpdated 2026-04-20
 ///
 /// @functions
 ///  - SenderCertificate: 발신자 인증서 데이터 클래스 (177바이트 고정)
