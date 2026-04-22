@@ -29,7 +29,6 @@ const int maxSkippedKeys = 500;
 
 /// Info strings for HKDF domain separation.
 final Uint8List _rkInfo = Uint8List.fromList(utf8.encode('SnowChat_Ratchet'));
-final Uint8List _mkInfo = Uint8List.fromList(utf8.encode('SnowChat_MsgKey'));
 
 // ---------------------------------------------------------------------------
 // EncryptedMessage
@@ -114,6 +113,39 @@ class _SkippedKey {
 ///
 /// Encryption uses XSalsa20-Poly1305 (pinenacl's SecretBox) which provides
 /// AEAD semantics equivalent to AES-256-GCM in security properties.
+///
+/// ## ⚠️ Security note: decrypt-time state mutation
+///
+/// [decrypt] advances ratchet state **before** the AEAD check succeeds — a
+/// forged message with a valid serialized header but a tampered ciphertext
+/// will still roll [receivingChainKey] forward (and, in the DH-ratchet
+/// branch, replace [rootKey] and [receivingChainKey] with values derived
+/// from an attacker-chosen ratchet public key). If the caller does nothing
+/// else, a single forged message can permanently desynchronise the chain.
+///
+/// The reference SnowChat integration mitigates this **at the service
+/// layer** rather than inside [decrypt] itself: every decrypt attempt is
+/// wrapped in a snapshot/restore helper that serialises the session via
+/// [toJson] before calling [decrypt] and deserialises the snapshot back
+/// on failure. In addition, superseded sessions are archived (kept alive
+/// for a 1-hour TTL) so in-flight messages encrypted under an old ratchet
+/// remain decryptable. See `SignalProtocolService._trialDecrypt` and
+/// `SignalProtocolService._tryDecryptFromArchive` in this package for the
+/// full pattern.
+///
+/// **If you call [decrypt] directly** (i.e. bypass [SignalProtocolService]),
+/// you MUST implement equivalent snapshot/restore semantics or a single
+/// adversarial message will break your session. At minimum:
+/// ```dart
+/// final snapshot = session.toJson();
+/// try {
+///   return session.decrypt(msg);
+/// } catch (_) {
+///   // Replace the corrupted in-memory state with the snapshot.
+///   restore(session, snapshot);
+///   rethrow;
+/// }
+/// ```
 class DoubleRatchetSession {
   /// Root key — updated on each DH ratchet step.
   Uint8List rootKey;

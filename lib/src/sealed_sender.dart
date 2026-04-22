@@ -19,7 +19,6 @@ import 'dart:typed_data';
 import 'package:pinenacl/x25519.dart' as nacl_api;
 
 import 'hkdf.dart' show hkdfDerive;
-import 'logger.dart';
 import 'sender_certificate.dart';
 import 'x25519.dart';
 

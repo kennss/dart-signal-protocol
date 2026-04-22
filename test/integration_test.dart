@@ -26,7 +26,7 @@ void main() {
       await alice.generateIdentityKeyPair();
       await alice.generateSignedPreKey(1);
       await alice.generateOneTimePreKeys(100, 5);
-      final aliceBundle = await alice.getPreKeyBundle();
+      await alice.getPreKeyBundle(); // warm-up; Alice's bundle isn't consumed in this flow
 
       // -- Setup Bob --
       final bob = SignalProtocolService();
@@ -51,11 +51,14 @@ void main() {
       expect(enc1['messageType'], 2); // pre-key message
 
       // -- Bob decrypts first message (establishes session) --
+      // TOFU receive-side: supply Alice's Ed25519 verify key so _receiveSession
+      // can pin / compare. Tests simulate the prekey-bundle lookup.
       final dec1 = await bob.decryptMessage(
         senderId: 'alice',
         deviceId: 'device-1',
         ciphertext: enc1['ciphertext'] as Uint8List,
         messageType: enc1['messageType'] as int,
+        senderIdentityKeyEd25519: alice.verifyKey,
       );
       expect(utf8.decode(dec1), 'Hello Bob!');
 
@@ -292,6 +295,7 @@ void main() {
         deviceId: 'device-1',
         ciphertext: enc1to1['ciphertext'] as Uint8List,
         messageType: enc1to1['messageType'] as int,
+        senderIdentityKeyEd25519: alice.verifyKey,
       );
       expect(utf8.decode(dec1to1), 'Private DM');
 

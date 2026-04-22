@@ -166,3 +166,19 @@ class PreKeyGenerator {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 }
+
+/// Top-level Isolate-safe worker for [PreKeyGenerator.generateOneTimePreKeys].
+///
+/// 100 X25519 keypairs take ~7.9s on a mid-range phone (e.g. Galaxy S25 FE),
+/// so callers that run on a UI thread should offload to an isolate. This
+/// top-level function is intentionally signature-compatible with Flutter's
+/// `compute(generateOneTimePreKeysIsolateWorker, (startId, count))` **and**
+/// pure-Dart `Isolate.run(() => generateOneTimePreKeysIsolateWorker((startId, count)))`.
+///
+/// [X25519KeyPair.generate] and [OneTimePreKey] both consist of primitive
+/// fields + [Uint8List], so they cross the isolate boundary cleanly.
+///
+/// Args: Record `(startId, count)`.
+List<OneTimePreKey> generateOneTimePreKeysIsolateWorker((int, int) args) {
+  return PreKeyGenerator.generateOneTimePreKeys(args.$1, args.$2);
+}

@@ -5,7 +5,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-07
-/// @lastUpdated 2026-04-12
+/// @lastUpdated 2026-04-20
 
 library dart_signal_protocol;
 
@@ -32,6 +32,10 @@ export 'src/sealed_sender.dart';
 
 // High-level orchestrator
 export 'src/signal_protocol_service.dart';
+
+// Identity pinning (TOFU)
+export 'src/identity_pin_store.dart';
+export 'src/identity_key_changed_exception.dart';
 
 // Optional debug logging
 export 'src/logger.dart' show setSignalProtocolLogger;
