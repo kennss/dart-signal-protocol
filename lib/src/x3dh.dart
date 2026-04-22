@@ -13,8 +13,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'logger.dart';
-
 import 'x25519.dart';
 import 'hkdf.dart';
 
@@ -89,7 +87,7 @@ class X3DH {
     offset += 32;
 
     if (hasOpk) {
-      final dh4 = x25519Dh(ephemeral.privateKey, remoteOneTimePreKey!);
+      final dh4 = x25519Dh(ephemeral.privateKey, remoteOneTimePreKey);
       dhConcat.setAll(offset, dh4);
     }
 
@@ -139,7 +137,7 @@ class X3DH {
     offset += 32;
 
     if (hasOpk) {
-      final dh4 = x25519Dh(oneTimePreKeyPrivate!, remoteEphemeralKey);
+      final dh4 = x25519Dh(oneTimePreKeyPrivate, remoteEphemeralKey);
       dhConcat.setAll(offset, dh4);
     }
 

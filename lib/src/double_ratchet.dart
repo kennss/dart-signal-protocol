@@ -29,7 +29,6 @@ const int maxSkippedKeys = 500;
 
 /// Info strings for HKDF domain separation.
 final Uint8List _rkInfo = Uint8List.fromList(utf8.encode('SnowChat_Ratchet'));
-final Uint8List _mkInfo = Uint8List.fromList(utf8.encode('SnowChat_MsgKey'));
 
 // ---------------------------------------------------------------------------
 // EncryptedMessage

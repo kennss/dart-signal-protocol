@@ -26,7 +26,7 @@ void main() {
       await alice.generateIdentityKeyPair();
       await alice.generateSignedPreKey(1);
       await alice.generateOneTimePreKeys(100, 5);
-      final aliceBundle = await alice.getPreKeyBundle();
+      await alice.getPreKeyBundle(); // warm-up; Alice's bundle isn't consumed in this flow
 
       // -- Setup Bob --
       final bob = SignalProtocolService();
