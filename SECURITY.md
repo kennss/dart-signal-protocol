@@ -44,7 +44,7 @@ These MUST hold at all times. Violations are security bugs:
 2. **No HSalsa20 on DH**: Uses `TweetNaCl.crypto_scalarmult()` directly, NOT `Box.sharedKey()`.
 3. **Ephemeral keys zeroed after use**: Sealed Sender `ek_seal` zeroed in `finally` block.
 4. **DH shared secrets zeroed after HKDF**: `dhResult.fillRange(0, len, 0x00)` after key derivation.
-5. **HKDF domain separation**: Each protocol uses unique info strings (`SnowChat_X3DH`, `SnowChat_Ratchet`, `SnowChat_SealedSender_v1`).
+5. **HKDF domain separation**: Each protocol uses unique info strings (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_SealedSender_v1`).
 6. **Certificate verified before inner payload processed**: Sealed Sender unseal rejects forged certificates before DR decrypt.
 7. **Replay protection (in-memory)**: `EK_seal` dedup cache (10K entries) checked before DH computation.
 8. **Fail-closed on missing sender Ed25519 verify key**: `createSession` and `_receiveSession` refuse session establishment rather than install an unverified session.
@@ -129,7 +129,7 @@ final service = SignalProtocolService(identityPinStore: MyIdentityPinStore());
 
 ### A-1 — HKDF `info` labels hardcoded to `SnowChat_*`
 
-**Description.** Domain-separation labels are constants (`SnowChat_X3DH`, `SnowChat_Ratchet`, `SnowChat_MsgKey`, `SnowChat_SealedSender_v1`). Products using this library as their cryptographic core inherit SnowChat's domain separation.
+**Description.** Domain-separation labels are constants (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_MsgKey`, `SnowChat_SealedSender_v1`). Products using this library as their cryptographic core inherit SnowChat's domain separation.
 
 **Impact.** Not a security weakening; domain separation is still effective. Non-interoperable with forks that alter these labels.
 
