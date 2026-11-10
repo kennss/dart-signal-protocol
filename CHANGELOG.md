@@ -13,6 +13,14 @@ the app's copy of the crypto code; this release brings the published library
 back in line with it. Each fix is covered by a new regression test in
 `test/signal_protocol_service_test.dart`.
 
+This release also ships **Identity Binding v1** (SnowChat `1f90c4e`,
+November 2026): account-signed Signal identities that a malicious server
+cannot substitute, with Safety Number v2 over account keys. It replaces the
+TOFU-only identity model of 0.2.x (see Added / Deprecated). Tests:
+`test/identity_binding_test.dart`, `test/verified_identity_store_test.dart`,
+`test/identity_binding_session_test.dart` (shared golden vectors in
+`test/fixtures/identity_binding_v1.json`).
+
 ### ⚠️ Breaking
 
 - **X3DH HKDF info is now domain-separated by path** (SnowChat `ddfbe6d`).
@@ -26,6 +34,14 @@ back in line with it. Each fix is covered by a new regression test in
   together.
 - **`saveSessionStore` returns `Future<bool>`** (was `Future<void>`) — see
   Changed. Callers that ignore the result keep compiling.
+- **`decryptMessage(senderIdentityKeyEd25519: …)` throws `ArgumentError`
+  when the service has an `identityStore`.** In that mode the sender is
+  verified from its binding (or via `identityDirectoryLookup`); a
+  server-supplied Ed25519 key is exactly what the binding replaces, so it is
+  refused loudly instead of being silently ignored. Unchanged without an
+  `identityStore`.
+- **`SignalProtocolService(identityPinStore:, identityStore:)` together
+  throws `ArgumentError`.** Pick one identity model.
 
 ### Fixed
 
@@ -63,6 +79,51 @@ back in line with it. Each fix is covered by a new regression test in
 
 ### Added
 
+- **Identity Binding v1** (SnowChat `1f90c4e`). A device's X25519 identity
+  key and Ed25519 signing key are signed by the user's long-term ACCOUNT
+  key, from which the peer id is derived, so anyone who knows a peer id can
+  verify that peer's keys offline.
+  - `IdentityBindingV1`: 172-byte message (`0xFF` prefix — no UTF-8 string
+    signer can produce it — fixed-length fields), fail-closed `verify()`
+    (canonical signature scalar S < L, small-order / non-canonical account
+    keys rejected, constant-time id derivation check), `sign()` from an
+    account seed, `nextEpoch()` minting rule, strict parsers. Byte-identical
+    to the SnowChat server/app golden vectors.
+  - `IdentityIdScheme` (pluggable account-key -> peer-id derivation; ids
+    are 36 ASCII chars) with the SnowChat-compatible default
+    `SnowChatIdScheme`.
+  - `IdentityBinding` (server wire form), `EmbeddedIdentityBinding` (inside
+    PreKey messages), `LocalIdentityBinding` (our own).
+  - `VerifiedIdentityStore` (abstract: storage primitives + policy —
+    monotonic epoch latch that survives `remove()`, invite-link pinning,
+    pending-change re-verification, legacy pin import, one-time IK seeding,
+    identity events) and `InMemoryVerifiedIdentityStore` (reference, tests).
+  - `IdentityAdmission`: bound / unbound admission, highest-valid-epoch
+    device selection, non-consuming directory pre-admission
+    (`admitDirectory`), promotion notices (`deviceKeysChanged` vs
+    `interceptionSuspected`).
+  - `IdentityBindingInvalidException` (typed, non-retryable, with
+    `IdentityBindingFailure` reason).
+  - `SignalProtocolService(identityStore: …)`: `createSession` admits the
+    bundle before X3DH (`identityBinding` / `identityBindingUnparseable` /
+    `accountPublicKey` bundle keys); PreKey messages embed our binding
+    (`setLocalIdentityBinding`); `decryptMessage` verifies the sender's
+    binding offline — over the X3DH header identity key, against
+    `envelopeDeviceId`, against the latch — before any signed / one-time
+    prekey is used, with `identityDirectoryLookup` for binding-less senders;
+    sessions record `remoteIdentityKey`, and sessions (active + archived)
+    that do not match a bound peer's key are purged
+    (`enforceBoundSessions`); legacy records are seeded once from the
+    persisted remote identity keys on `loadSessionStore`.
+  - Legacy (binding-less) peers follow a Signal-style policy: unverified ->
+    keys updated + `legacyKeyChanged` event; verified -> held as pending and
+    `IdentityKeyChangedException` until `acceptPendingChange`.
+- **Safety Number v2** — `SafetyNumber.forAccountKeys()` hashes both users'
+  account keys (version 2), so both peers always see the same 60 digits and
+  a device reinstall does not change them. Byte-compatible with SnowChat.
+- **`DoubleRatchetSession.remoteIdentityKey`** — persisted in `toJson()`;
+  absent for sessions saved by earlier versions.
+- **`IdentityKeyChangedException.peerId`** — alias of `peerSnowchatId`.
 - **Sealed Sender Step 9 identity cross-check** (SnowChat `c062a09`).
   `resolveSealedMessageType` rejects a prekey message whose X3DH identity
   key does not equal the identity in the server-signed sender certificate
@@ -81,6 +142,14 @@ back in line with it. Each fix is covered by a new regression test in
   for an existing entry so retry requests that reference the server id can
   be answered.
 
+### Deprecated
+
+- **`IdentityPinStore`** and the `identityPinStore:` constructor parameter.
+  TOFU on the Signal Ed25519 key, keyed by device id, cannot detect a server
+  substituting keys on first contact or after a reinstall. Still honoured
+  when no `identityStore` is set; carry existing pins over with
+  `VerifiedIdentityStore.importLegacyPin`.
+
 ### Changed
 
 - **`saveSessionStore` returns whether bytes reached disk.** `false` when no
@@ -90,8 +159,16 @@ back in line with it. Each fix is covered by a new regression test in
 
 ### Not included
 
-- The SnowChat app's TOFU identity-pin keying and Safety Number computation
-  are being reworked separately and are not part of this release.
+- Application-side Identity Binding pieces stay in the SnowChat app: the
+  migration of its pre-binding SecureStorage key layout
+  (`signal_identity_pin:*`), keychain-locked (BFU) deferral and
+  cross-isolate caching of its store implementation, account-key storage and
+  the purpose-bound auth-challenge signer, binding upload / self-check /
+  re-sign against its server, invite-link (`?k=`) parsing, held-message
+  queueing and UI. They depend on the app's storage, server API and UI; the
+  library exposes the hooks they build on (`VerifiedIdentityStore`
+  primitives, `importLegacyPin`, `IdentityBindingV1.sign` / `nextEpoch`,
+  `IdentityAdmission.admitDirectory`, identity events).
 - App-only orchestration from the same SnowChat commits (session-manager
   signed-prekey reconcile, prekey upload mutex, message-queue placeholders,
   server-side atomic OPK consume / replace) is application or server logic

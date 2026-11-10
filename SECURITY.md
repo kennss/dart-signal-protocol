@@ -27,6 +27,7 @@ All audits to date have been **internal**. No external third-party firm audit ha
 
 | Date | Scope | Performed by | Result |
 |------|-------|--------------|--------|
+| 2026-11-10 | Identity Binding v1 (design + implementation review, SnowChat B-2) | Internal (AI-assisted, multi-pass) | Server key-substitution (SC-02) closed for bound peers; review findings (signing-oracle prefix, canonical S, small-order account keys, epoch floor, legacy-Ed weakness, notice-once, non-consuming pre-admission, strict parsing) resolved before release. |
 | 2026-04-22 | Full protocol + service layer (Claude Opus 4.7 reconnaissance pass) | Internal (AI-assisted) | C-1, H-1, H-2, M-3, M-4 — resolved at service layer in v0.2.0-alpha.1 backport. C-2 documented as open limitation. |
 | 2026-04 | Sealed Sender 6-stage review (design → code → critical audit → verification → fix → trace) | Internal | Resolved within scope (P0: 1, P1: 5). Replay-cache persistence carried forward as known limitation. |
 | 2026-04 | Phase 8.7 E2EE stabilization (8 rounds, multi-agent reproduction + cross-verification) | Internal | 13 defects resolved. Zero plaintext leak paths found. |
@@ -47,8 +48,12 @@ These MUST hold at all times. Violations are security bugs:
 5. **HKDF domain separation**: Each protocol uses unique info strings (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_SealedSender_v1`).
 6. **Certificate verified before inner payload processed**: Sealed Sender unseal rejects forged certificates before DR decrypt.
 7. **Replay protection (in-memory)**: `EK_seal` dedup cache (10K entries) checked before DH computation.
-8. **Fail-closed on missing sender Ed25519 verify key**: `createSession` and `_receiveSession` refuse session establishment rather than install an unverified session.
+8. **Fail-closed on missing sender Ed25519 verify key**: `createSession` always, and `_receiveSession` in legacy mode (no `identityStore`), refuse session establishment rather than install an unverified session.
 9. **Plaintext session-store fallback refused**: `saveSessionStore` skips the write if no encryption key is installed (rather than write identity + ratchet material in the clear).
+10. **Identity admission before key material is used** (with an `identityStore`): bundles are admitted before X3DH; PreKey messages are admitted before any signed / one-time prekey is read or consumed.
+11. **Binding verification is fail-closed and never throws**: account key 32 B, canonical, not small-order; account key derives the peer id (constant time); canonical signature scalar (S < L); lowercase-UUID device id; 0xFF-prefixed fixed-length message, so no UTF-8 string signer can produce a valid binding.
+12. **Latch never decreases and survives `remove()`**: a peer that once proved a binding can never be accepted unbound again; an epoch below the latch (or the same epoch for different keys) is rejected.
+13. **Bound sessions only**: sessions (active and archived) whose recorded remote identity key differs from a bound peer's key are purged before encrypt / decrypt and never used.
 
 ---
 
@@ -95,29 +100,27 @@ try {
 
 **Status.** Not fixed in this release. Tracked as roadmap item "Persistent Sealed Sender replay cache".
 
-### M-3 — TOFU identity pinning is opt-in
+### M-3 — Identity verification is opt-in; legacy peers remain TOFU
 
-**Description.** `SignalProtocolService({IdentityPinStore? identityPinStore})` accepts an optional pin store. When omitted, `_tofuPinCheck` is a no-op — any Ed25519 identity key the remote peer presents is accepted on every session establishment. A server capable of swapping a peer's advertised identity key between sessions will not trigger `IdentityKeyChangedException`.
+**Description.** `SignalProtocolService` verifies peer identities only when constructed with an `identityStore` (Identity Binding v1). Without it, any identity key the server presents is accepted (or, with the **deprecated** `IdentityPinStore`, accepted on first contact and after every reinstall). Even with an `identityStore`, a peer that has never published a binding is handled with Signal-style TOFU: a hostile server can substitute such a peer's keys on first contact, and a later change is only *announced* (`legacyKeyChanged`) — blocked only if the user had marked the peer verified.
 
-**Mitigation.** Implement and inject an `IdentityPinStore` backed by platform-secure storage:
+**What Identity Binding v1 does and does not cover.**
 
-```dart
-class MyIdentityPinStore implements IdentityPinStore {
-  @override
-  Future<Uint8List?> getPinned(String sessionKey) async {
-    // Read from Keychain / Keystore / encrypted SQLite
-  }
+| Threat | Covered? |
+|---|---|
+| Server substitutes a bound peer's bundle (send side) | ✅ `signatureInvalid` / `accountKeyMismatch` |
+| Server swaps the X3DH header identity key of a PreKey message | ✅ signature is verified over the header key, before prekeys are touched |
+| Server strips the binding of a peer that proved one (downgrade) | ✅ `downgrade` (latch) |
+| Server replays an older, validly signed binding | ✅ `epochRegression` |
+| Server substitutes a never-bound (legacy) peer on first contact | ❌ TOFU — mitigate with `pinFromInviteLink()` (out-of-band account key) |
+| Account-key compromise (leaked recovery phrase) | ❌ an attacker can sign new bindings; surfaced only as a `deviceKeysChanged` notice |
+| Integrator persists the latch unreliably | ❌ the downgrade window re-opens — the latch MUST be persisted durably |
 
-  @override
-  Future<void> pin(String sessionKey, Uint8List identityKey) async {
-    // Write to the same backend
-  }
-}
+**Mitigation.** Inject a persistent `VerifiedIdentityStore` subclass, derive peer ids from account keys (`IdentityIdScheme`), upload bindings, pass `envelopeDeviceId` / `identityDirectoryLookup` on receive, treat `IdentityBindingInvalidException` as terminal, and show Safety Numbers over account keys (`SafetyNumber.forAccountKeys`). README `§ Known Risks #3` lists every caller obligation.
 
-final service = SignalProtocolService(identityPinStore: MyIdentityPinStore());
-```
+**Divergence from the SnowChat app.** The library's `isPeerVerified` errors propagate (the admission fails transiently) instead of being treated as "not verified", so a storage error can never silently accept a verified peer's key change.
 
-**Status.** Interface shipped (`identity_pin_store.dart`), no concrete implementation bundled. Considered final design — storage backends are deliberately out of scope.
+**Status.** Identity Binding v1 shipped in 0.3.0-alpha.1. `IdentityPinStore` is deprecated and kept only for backward compatibility; passing both stores throws.
 
 ### A-2 — `SignalProtocolService` imports `dart:io`; Flutter Web builds fail
 
@@ -129,7 +132,7 @@ final service = SignalProtocolService(identityPinStore: MyIdentityPinStore());
 
 ### A-1 — HKDF `info` labels hardcoded to `SnowChat_*`
 
-**Description.** Domain-separation labels are constants (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_MsgKey`, `SnowChat_SealedSender_v1`). Products using this library as their cryptographic core inherit SnowChat's domain separation.
+**Description.** Domain-separation labels are constants (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_MsgKey`, `SnowChat_SealedSender_v1`, and the Identity Binding v1 format label `SnowChat_IdentityBinding_v1`). Products using this library as their cryptographic core inherit SnowChat's domain separation. The binding label is part of the fixed 172-byte v1 format shared with the SnowChat golden vectors; a dedicated account key per product keeps bindings from different products apart.
 
 **Impact.** Not a security weakening; domain separation is still effective. Non-interoperable with forks that alter these labels.
 
@@ -149,7 +152,8 @@ final service = SignalProtocolService(identityPinStore: MyIdentityPinStore());
 
 | Version | Supported |
 |---------|-----------|
-| 0.2.x | Yes — current |
+| 0.3.x | Yes — current |
+| 0.2.x | Security fixes only (cannot establish new sessions with 0.3.x — X3DH info change) |
 | 0.1.x | Security fixes only |
 | < 0.1 | No |
 
