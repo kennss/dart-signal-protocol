@@ -1,19 +1,19 @@
 /// @file        double_ratchet.dart
-/// @description Double Ratchet 알고리즘 구현. 메시지별 전방향/후방향 비밀성 보장
+/// @description Double Ratchet algorithm. Per-message forward secrecy and post-compromise security
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-04-12
+/// @lastUpdated 2026-11-10 (Identity Binding v1: sessions persist remoteIdentityKey — the peer X25519 identity key used in X3DH — so sessions can be checked against a peer's account-bound identity; header translated to English)
 ///
 /// @functions
-///  - EncryptedMessage: 암호화된 메시지 데이터 클래스 (암호문 + 래칫 키 + 메시지 번호)
-///  - DoubleRatchetSession: Double Ratchet 세션 상태 및 암복호화 클래스
-///  - DoubleRatchetSession.initSender(): X3DH 공유 비밀로 송신자 세션 초기화
-///  - DoubleRatchetSession.initReceiver(): X3DH 공유 비밀로 수신자 세션 초기화
-///  - DoubleRatchetSession.encrypt(): 평문을 암호화하여 EncryptedMessage 반환
-///  - DoubleRatchetSession.decrypt(): EncryptedMessage를 복호화하여 평문 반환
-///  - DoubleRatchetSession.toJson(): 세션 상태 직렬화
-///  - DoubleRatchetSession.fromJson(): 세션 상태 역직렬화
+///  - EncryptedMessage: encrypted message data class (ciphertext + ratchet key + message number)
+///  - DoubleRatchetSession: Double Ratchet session state and encrypt/decrypt
+///  - DoubleRatchetSession.initSender(): initialize the sender session from the X3DH shared secret
+///  - DoubleRatchetSession.initReceiver(): initialize the receiver session from the X3DH shared secret
+///  - DoubleRatchetSession.encrypt(): encrypt plaintext into an EncryptedMessage
+///  - DoubleRatchetSession.decrypt(): decrypt an EncryptedMessage into plaintext
+///  - DoubleRatchetSession.toJson(): serialize session state
+///  - DoubleRatchetSession.fromJson(): deserialize session state
 
 import 'dart:convert';
 import 'dart:math';
@@ -409,6 +409,12 @@ class DoubleRatchetSession {
   int? preKeySignedPreKeyId;
   int? preKeyOneTimePreKeyId;
 
+  /// The remote X25519 identity key this session was established with
+  /// (X3DH). Null only for sessions persisted before 0.3.0. Used by
+  /// SignalProtocolService to refuse / purge sessions that do not match a
+  /// peer's account-bound identity key (Identity Binding v1).
+  Uint8List? remoteIdentityKey;
+
   Map<String, dynamic> toJson() => {
         'rootKey': _bytesToHex(rootKey),
         'sendingChainKey':
@@ -430,6 +436,8 @@ class DoubleRatchetSession {
           'preKeySignedPreKeyId': preKeySignedPreKeyId,
         if (preKeyOneTimePreKeyId != null)
           'preKeyOneTimePreKeyId': preKeyOneTimePreKeyId,
+        if (remoteIdentityKey != null)
+          'remoteIdentityKey': _bytesToHex(remoteIdentityKey!),
       };
 
   /// Deserialize session state from a JSON map.
@@ -460,7 +468,10 @@ class DoubleRatchetSession {
           ? _hexToBytes(json['ephemeralPublicKey'] as String)
           : null
       ..preKeySignedPreKeyId = json['preKeySignedPreKeyId'] as int?
-      ..preKeyOneTimePreKeyId = json['preKeyOneTimePreKeyId'] as int?;
+      ..preKeyOneTimePreKeyId = json['preKeyOneTimePreKeyId'] as int?
+      ..remoteIdentityKey = json['remoteIdentityKey'] != null
+          ? _hexToBytes(json['remoteIdentityKey'] as String)
+          : null;
   }
 }
 

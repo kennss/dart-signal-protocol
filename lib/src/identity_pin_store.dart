@@ -1,12 +1,13 @@
 /// @file        identity_pin_store.dart
-/// @description Abstract TOFU identity pin store. Stores a peer's Ed25519
-///              verify key on first encounter and checks on subsequent
-///              session establishments. Callers supply a concrete
-///              implementation (backed by secure storage / Keychain / etc.).
+/// @description DEPRECATED (0.3.0) abstract TOFU identity pin store,
+///              superseded by VerifiedIdentityStore (Identity Binding v1).
+///              Stores a peer's Ed25519 verify key on first encounter and
+///              checks on subsequent session establishments. Still honoured by
+///              SignalProtocolService when no VerifiedIdentityStore is set.
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-20
-/// @lastUpdated 2026-04-20
+/// @lastUpdated 2026-11-10 (deprecated in favour of VerifiedIdentityStore)
 ///
 /// @functions
 ///  - IdentityPinStore: abstract TOFU pin interface
@@ -16,6 +17,12 @@
 import 'dart:typed_data';
 
 /// Trust-on-First-Use (TOFU) pin store for peer Ed25519 identity keys.
+///
+/// **Deprecated.** TOFU on the Signal-layer key cannot detect a server that
+/// substitutes keys on first contact or after a reinstall (the pin is keyed
+/// by deviceId, which changes on every install). Use [VerifiedIdentityStore]
+/// with account-signed identity bindings instead; existing pins can be
+/// carried over with `VerifiedIdentityStore.importLegacyPin`.
 ///
 /// This library does not prescribe persistence. A concrete implementation
 /// should write to a platform-secure store (iOS Keychain, Android Keystore,
@@ -27,6 +34,7 @@ import 'dart:typed_data';
 /// Mismatches between the pinned key and the newly observed key MUST surface
 /// as an [IdentityKeyChangedException] from the calling code so the upper
 /// layers can run their Safety Number / verification workflow.
+@Deprecated('Use VerifiedIdentityStore (Identity Binding v1) instead')
 abstract class IdentityPinStore {
   /// Fetch the pinned 32-byte Ed25519 verify key for [sessionKey].
   /// Returns `null` if no pin exists yet (first encounter).

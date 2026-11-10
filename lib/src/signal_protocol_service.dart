@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-29
-/// @lastUpdated 2026-11-10 (backport SnowChat c062a09/dc71736/591d0b9/ddfbe6d: resolveSealedMessageType() + Sealed Sender Step 9, persistent PreKey until first inbound decrypt, type-2 archive fallback, OPK fail-loud, saveSessionStore -> Future<bool> with atomic write, signedPreKeyPublicKey()/hasAnySignedPreKey for SPK self-heal; header translated to English)
+/// @lastUpdated 2026-11-10 (Identity Binding v1 (SnowChat 1f90c4e): optional VerifiedIdentityStore replaces the TOFU IdentityPinStore — createSession() verifies the bundle's account-signed binding (or applies the Signal-style legacy policy) BEFORE X3DH; type-2 messages embed our binding and decryptMessage() verifies the sender's binding offline BEFORE any SPK/OPK is touched; sessions record remoteIdentityKey and sessions not matching a bound peer's IK are purged and never used. Earlier same day: backport SnowChat c062a09/dc71736/591d0b9/ddfbe6d: resolveSealedMessageType() + Sealed Sender Step 9, persistent PreKey until first inbound decrypt, type-2 archive fallback, OPK fail-loud, saveSessionStore -> Future<bool> with atomic write, signedPreKeyPublicKey()/hasAnySignedPreKey for SPK self-heal; header translated to English)
 ///
 /// @functions
 ///  - SignalProtocolService: Pure Dart Signal Protocol implementation class
@@ -13,7 +13,7 @@
 ///  - SignalProtocolService.getPreKeyBundle(): Get the server-upload PreKey bundle
 ///  - SignalProtocolService.signedPreKeyPublicKey(): Public key of a locally-held signed prekey (SPK self-heal reconcile)
 ///  - SignalProtocolService.hasAnySignedPreKey: Whether any signed prekey private key is held locally
-///  - SignalProtocolService.createSession(): Create a new session via X3DH (with TOFU check)
+///  - SignalProtocolService.createSession(): Create a new session via X3DH (identity admission or legacy TOFU first)
 ///  - SignalProtocolService.hasSession(): Check whether a session exists
 ///  - SignalProtocolService.deleteSession(): Delete a session
 ///  - SignalProtocolService.archiveSession(): Archive a session (temporary retention instead of delete, 1h TTL)
@@ -26,7 +26,14 @@
 ///  - SignalProtocolService.decryptGroupMessage(): Decrypt a group message
 ///  - SignalProtocolService.saveSessionStore(): Atomically save encrypted session state (including archived sessions); returns whether bytes reached disk
 ///  - SignalProtocolService.loadSessionStore(): Load session state (restore archived sessions + TTL check)
+///  - SignalProtocolService.setLocalIdentityBinding(): install our binding for type-2 embedding
+///  - SignalProtocolService.enforceBoundSessions(): purge sessions not matching a bound peer IK
+///  - SignalProtocolService.remoteIdentityKeySnapshot(): copy of the learned remote IKs
 ///  - SignalProtocolException: Signal Protocol exception class
+
+// The deprecated IdentityPinStore is still honoured for integrators that have
+// not migrated to VerifiedIdentityStore.
+// ignore_for_file: deprecated_member_use_from_same_package
 
 import 'dart:async';
 import 'dart:convert';
@@ -39,6 +46,10 @@ import 'package:pinenacl/ed25519.dart' as ed;
 import 'package:pinenacl/x25519.dart' as nacl_api;
 
 import 'double_ratchet.dart';
+import 'identity_admission.dart';
+import 'identity_binding.dart';
+import 'identity_binding_exception.dart';
+import 'identity_bytes.dart' show constantTimeEquals;
 import 'identity_key_changed_exception.dart';
 import 'identity_pin_store.dart';
 import 'logger.dart';
@@ -46,6 +57,7 @@ import 'message_send_log.dart';
 import 'prekey_bundle.dart';
 import 'sender_key.dart';
 import 'sender_key_tracker.dart';
+import 'verified_identity_store.dart';
 import 'x25519.dart';
 import 'x3dh.dart';
 
@@ -221,6 +233,23 @@ class SignalProtocolService {
   Uint8List? getRemoteIdentityKey(String recipientId) =>
       _remoteIdentityKeys[recipientId];
 
+  /// Copy of the learned remote identity keys (peer id -> X25519 IK).
+  Map<String, Uint8List> remoteIdentityKeySnapshot() =>
+      Map<String, Uint8List>.from(_remoteIdentityKeys);
+
+  /// Identity Binding v1: our own account-signed binding, embedded in every
+  /// type-2 (PreKey) message so receivers can verify us offline.
+  LocalIdentityBinding? _localBinding;
+
+  /// Install (or clear) our binding (see [IdentityBindingV1.sign]). It is
+  /// only embedded while it covers the CURRENT identity + Ed25519 keys; a
+  /// stale binding is never sent. Re-install after rotating either key.
+  void setLocalIdentityBinding(LocalIdentityBinding? binding) {
+    _localBinding = binding;
+  }
+
+  LocalIdentityBinding? get localIdentityBinding => _localBinding;
+
   /// Access Ed25519 signing seed (for secure storage backup).
   Uint8List? get signingKeySeed => _identitySigningKeySeed;
 
@@ -301,6 +330,345 @@ class SignalProtocolService {
   static String _maskSessionKey(String sessionKey) {
     if (sessionKey.length <= 12) return sessionKey;
     return '${sessionKey.substring(0, 8)}...${sessionKey.substring(sessionKey.length - 4)}';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Identity Binding v1 — admission + bound-session enforcement
+  // ---------------------------------------------------------------------------
+
+  /// Send-side admission for the bundle of [peerId]:[deviceId]. Returns null
+  /// when no [VerifiedIdentityStore] is configured.
+  ///
+  /// Bundle keys read here (all optional): `identityBinding`
+  /// ([IdentityBinding]), `identityBindingUnparseable` (bool — the server sent
+  /// a binding object that failed [IdentityBinding.tryParseWire]) and
+  /// `accountPublicKey` (Uint8List).
+  Future<AdmittedIdentity?> _admitForSend({
+    required String peerId,
+    required String deviceId,
+    required Uint8List identityKey,
+    required Uint8List ed25519,
+    required Map<String, dynamic> bundle,
+  }) async {
+    final store = _identityStore;
+    if (store == null) return null;
+    final admission = IdentityAdmission(store);
+    try {
+      if (bundle['identityBindingUnparseable'] == true) {
+        throw admission.reject(peerId, IdentityBindingFailure.badFormat);
+      }
+      final rawBinding = bundle['identityBinding'];
+      if (rawBinding != null && rawBinding is! IdentityBinding) {
+        // Fail loud: a raw wire map here means the caller forgot to parse it
+        // with IdentityBinding.tryParseWire — never treat it as "absent".
+        throw ArgumentError(
+            "preKeyBundle['identityBinding'] must be an IdentityBinding "
+            '(parse the wire form with IdentityBinding.tryParseWire)');
+      }
+      final binding = rawBinding as IdentityBinding?;
+      final account = bundle['accountPublicKey'] as Uint8List?;
+      if (binding != null) {
+        final acct = account ?? (await store.getFresh(peerId))?.accountPublicKey;
+        if (acct == null) {
+          throw admission.reject(peerId, IdentityBindingFailure.badFormat);
+        }
+        return await admission.admitBound(
+          peerId: peerId,
+          deviceId: deviceId,
+          identityKey: identityKey,
+          ed25519: ed25519,
+          accountPublicKey: acct,
+          epoch: binding.epoch,
+          signature: binding.signature,
+        );
+      }
+      return await admission.admitUnbound(
+        peerId: peerId,
+        deviceId: deviceId,
+        identityKey: identityKey,
+        ed25519: ed25519,
+        accountPublicKey: account,
+      );
+    } on SignalProtocolException {
+      rethrow;
+    } on IdentityKeyChangedException {
+      rethrow;
+    } on ArgumentError {
+      rethrow;
+    } catch (e) {
+      throw SignalProtocolException(
+        'Identity store failure for ${_maskSessionKey('$peerId:$deviceId')} '
+        '(transient): ${e.runtimeType}',
+      );
+    }
+  }
+
+  /// Receive-side admission for a PreKey message. With [directoryLookup] ==
+  /// null this never leaves the process and returns null for an unknown
+  /// binding-less sender (resolved later, only if a new session is needed).
+  Future<AdmittedIdentity?> _admitForReceive({
+    required String peerId,
+    required String sessionDeviceId,
+    required String? envelopeDeviceId,
+    required _PreKeyMessageData parsed,
+    required Future<RemoteIdentityDirectory?> Function()? directoryLookup,
+  }) async {
+    final store = _identityStore;
+    if (store == null) return null;
+    final admission = IdentityAdmission(store);
+    final headerIk = parsed.identityKey;
+    try {
+      if (parsed.bindingUnparseable) {
+        throw admission.reject(peerId, IdentityBindingFailure.badFormat);
+      }
+      final emb = parsed.binding;
+      if (emb != null) {
+        // The binding must name the device the envelope / sealed certificate
+        // names. Without a transport deviceId there is nothing to compare;
+        // the signature and the epoch latch still apply.
+        if (envelopeDeviceId != null &&
+            envelopeDeviceId.isNotEmpty &&
+            emb.deviceId != envelopeDeviceId) {
+          throw admission.reject(peerId, IdentityBindingFailure.deviceMismatch);
+        }
+        // The signature is checked over the X3DH HEADER IK: a header carrying
+        // any IK other than the one the account signed fails here.
+        return await admission.admitBound(
+          peerId: peerId,
+          deviceId: emb.deviceId,
+          identityKey: headerIk,
+          ed25519: emb.ed25519,
+          accountPublicKey: emb.accountPublicKey,
+          epoch: emb.epoch,
+          signature: emb.signature,
+        );
+      }
+
+      // No embedded binding.
+      if (await store.latchedEpoch(peerId, fresh: true) != null) {
+        throw admission.reject(peerId, IdentityBindingFailure.downgrade);
+      }
+      final claimedDevice =
+          (envelopeDeviceId != null && envelopeDeviceId.isNotEmpty)
+              ? envelopeDeviceId
+              : sessionDeviceId;
+      final rec = await store.get(peerId);
+      if (rec != null && (rec.identityKey != null || rec.ed25519 != null)) {
+        return await admission.admitUnbound(
+          peerId: peerId,
+          deviceId: claimedDevice,
+          identityKey: headerIk,
+          ed25519: null,
+        );
+      }
+      if (directoryLookup == null) return null;
+
+      // Unknown binding-less sender: consult the non-consuming directory.
+      RemoteIdentityDirectory? dir;
+      try {
+        dir = await directoryLookup();
+      } catch (e) {
+        throw SignalProtocolException(
+          'Identity directory lookup failed for '
+          '${_maskSessionKey('$peerId:$claimedDevice')} (transient): '
+          '${e.runtimeType}',
+        );
+      }
+      final dev = dir?.deviceById(claimedDevice);
+      if (dev != null && (dev.binding != null || dev.bindingUnparseable)) {
+        // The server holds a binding for this device, yet the message carried
+        // none: it must at least use the bound IK, and the binding must verify.
+        final b = dev.binding;
+        final ed = dev.ed25519;
+        final acct = dir!.accountPublicKey;
+        if (b == null || ed == null || acct == null) {
+          throw admission.reject(peerId, IdentityBindingFailure.badFormat);
+        }
+        if (!constantTimeEquals(dev.identityKey, headerIk)) {
+          throw admission.reject(
+              peerId, IdentityBindingFailure.identityKeyMismatch);
+        }
+        return await admission.admitBound(
+          peerId: peerId,
+          deviceId: dev.deviceId,
+          identityKey: headerIk,
+          ed25519: ed,
+          accountPublicKey: acct,
+          epoch: b.epoch,
+          signature: b.signature,
+        );
+      }
+      return await admission.admitUnbound(
+        peerId: peerId,
+        deviceId: claimedDevice,
+        identityKey: headerIk,
+        ed25519: dev?.ed25519,
+        accountPublicKey: dir?.accountPublicKey,
+      );
+    } on SignalProtocolException {
+      rethrow;
+    } on IdentityKeyChangedException {
+      rethrow;
+    } catch (e) {
+      throw SignalProtocolException(
+        'Identity store failure for '
+        '${_maskSessionKey('$peerId:$sessionDeviceId')} (transient): '
+        '${e.runtimeType}',
+      );
+    }
+  }
+
+  /// If [peerId] is bound (Identity Binding v1), purge every session —
+  /// active and archived — whose remote IK differs from the bound IK, so it
+  /// can never be used to encrypt or decrypt. Returns the purge count. A
+  /// no-op without a [VerifiedIdentityStore]. Store read failures are
+  /// non-fatal here (nothing is purged).
+  ///
+  /// Called automatically by [hasSession], [encryptMessage] and
+  /// [decryptMessage]; integrators may also call it after an out-of-band
+  /// admission (e.g. [IdentityAdmission.admitDirectory]).
+  Future<int> enforceBoundSessions(String peerId) async {
+    final store = _identityStore;
+    if (store == null) return 0;
+    try {
+      final rec = await store.get(peerId);
+      if (rec == null || !rec.bound || rec.identityKey == null) return 0;
+      if (!_hasSessionsNotMatching(peerId, rec.identityKey!, rec.deviceId)) {
+        return 0;
+      }
+      // Destructive path: confirm against storage, not a cache — another
+      // process / isolate may have accepted a newer bound identity.
+      final fresh = await store.getFresh(peerId);
+      if (fresh == null || !fresh.bound || fresh.identityKey == null) return 0;
+      return _purgeSessionsNotMatching(
+          peerId, fresh.identityKey!, fresh.deviceId);
+    } catch (e) {
+      debugPrint('[SignalProtocolService] enforceBoundSessions skipped: '
+          '${e.runtimeType}');
+      return 0;
+    }
+  }
+
+  /// Classify a session's remote IK against a bound identity. Sessions
+  /// persisted before 0.3.0 carry no remote IK; such a session is inferred
+  /// to match ONLY when it belongs to the bound device AND the last X3DH IK
+  /// recorded for the peer is the bound IK (one install = one deviceId = one
+  /// IK). Every other unknown-IK session is treated as not matching.
+  bool _sessionMatchesBound({
+    required Uint8List? sessionIk,
+    required String sessionKey,
+    required String peerId,
+    required Uint8List boundIk,
+    required String? boundDeviceId,
+  }) {
+    if (sessionIk != null) return _constantTimeBytesEqual(sessionIk, boundIk);
+    final colon = sessionKey.lastIndexOf(':');
+    final dev = colon > 0 ? sessionKey.substring(colon + 1) : null;
+    final lastIk = _remoteIdentityKeys[peerId];
+    return boundDeviceId != null &&
+        dev == boundDeviceId &&
+        lastIk != null &&
+        _constantTimeBytesEqual(lastIk, boundIk);
+  }
+
+  static Uint8List? _archivedIk(_ArchivedSessionEntry a) {
+    final hex = a.sessionJson['remoteIdentityKey'];
+    return hex is String ? _hexToBytes(hex) : null;
+  }
+
+  bool _hasSessionsNotMatching(
+      String peerId, Uint8List boundIk, String? boundDeviceId) {
+    final prefix = '$peerId:';
+    for (final e in _sessions.entries) {
+      if (!e.key.startsWith(prefix)) continue;
+      for (final sess in e.value) {
+        // An unknown IK still needs labelling, so it counts as "to process".
+        if (sess.remoteIdentityKey == null ||
+            !_sessionMatchesBound(
+                sessionIk: sess.remoteIdentityKey,
+                sessionKey: e.key,
+                peerId: peerId,
+                boundIk: boundIk,
+                boundDeviceId: boundDeviceId)) {
+          return true;
+        }
+      }
+    }
+    for (final e in _archivedSessions.entries) {
+      if (!e.key.startsWith(prefix)) continue;
+      for (final a in e.value) {
+        final ik = _archivedIk(a);
+        if (ik == null ||
+            !_sessionMatchesBound(
+                sessionIk: ik,
+                sessionKey: e.key,
+                peerId: peerId,
+                boundIk: boundIk,
+                boundDeviceId: boundDeviceId)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Purge for a bound peer. Unknown-IK sessions inferred to match (see
+  /// [_sessionMatchesBound]) are labelled with the bound IK and kept;
+  /// everything else that does not match is removed.
+  int _purgeSessionsNotMatching(
+      String peerId, Uint8List boundIk, String? boundDeviceId) {
+    final prefix = '$peerId:';
+    var removed = 0;
+    var labelled = false;
+    for (final key in _sessions.keys.toList()) {
+      if (!key.startsWith(prefix)) continue;
+      final list = _sessions[key]!;
+      final before = list.length;
+      list.removeWhere((sess) {
+        final keep = _sessionMatchesBound(
+            sessionIk: sess.remoteIdentityKey,
+            sessionKey: key,
+            peerId: peerId,
+            boundIk: boundIk,
+            boundDeviceId: boundDeviceId);
+        if (keep && sess.remoteIdentityKey == null) {
+          sess.remoteIdentityKey = Uint8List.fromList(boundIk);
+          labelled = true;
+        }
+        return !keep;
+      });
+      removed += before - list.length;
+      if (list.isEmpty) _sessions.remove(key);
+    }
+    for (final key in _archivedSessions.keys.toList()) {
+      if (!key.startsWith(prefix)) continue;
+      final list = _archivedSessions[key]!;
+      final before = list.length;
+      list.removeWhere((a) {
+        final ik = _archivedIk(a);
+        final keep = _sessionMatchesBound(
+            sessionIk: ik,
+            sessionKey: key,
+            peerId: peerId,
+            boundIk: boundIk,
+            boundDeviceId: boundDeviceId);
+        if (keep && ik == null) {
+          a.sessionJson['remoteIdentityKey'] = _bytesToHex(boundIk);
+          labelled = true;
+        }
+        return !keep;
+      });
+      removed += before - list.length;
+      if (list.isEmpty) _archivedSessions.remove(key);
+    }
+    // Labels / removals must reach disk: reuse the "needs persist" flag.
+    if (removed > 0 || labelled) _archiveDecryptDirty = true;
+    if (removed > 0) {
+      _remoteIdentityKeys[peerId] = Uint8List.fromList(boundIk);
+      debugPrint('[SignalProtocolService] Purged $removed session(s) not '
+          'matching the bound identity of ${_maskSessionKey(prefix)}');
+    }
+    return removed;
   }
 
   /// Try every session in [sessions] (newest first) to decrypt [encrypted].
@@ -389,15 +757,41 @@ class SignalProtocolService {
   /// Random generator for registration IDs.
   static final _rng = Random.secure();
 
-  /// Optional TOFU pin store for remote Ed25519 identity keys. When null,
-  /// the TOFU check is skipped (tests / scripts that don't wire persistent
-  /// storage); production wiring should always inject a concrete store.
+  /// Deprecated TOFU pin store (pre-0.3.0 identity model). Only consulted
+  /// when no [VerifiedIdentityStore] is configured.
   final IdentityPinStore? _identityPinStore;
 
+  /// Identity Binding v1 store. When set, every new session (send and
+  /// receive) goes through [IdentityAdmission] BEFORE X3DH, and sessions
+  /// that do not match a bound peer's identity key are purged.
+  final VerifiedIdentityStore? _identityStore;
+
+  /// Identity models (pick ONE):
+  ///  - [identityStore] (recommended): Identity Binding v1. Peers that publish
+  ///    an account-signed binding are verified offline against their peer id;
+  ///    peers without one fall back to a Signal-style TOFU policy, and a peer
+  ///    that proved a binding once can never be downgraded.
+  ///  - [identityPinStore] (deprecated): TOFU on the Ed25519 key only. A
+  ///    malicious server can substitute the keys of any peer on first
+  ///    contact and after every reinstall.
+  ///  - neither: NO identity checks at all — only for tests and tools.
+  /// Passing both throws [ArgumentError].
   SignalProtocolService({
     bool? useMockFallback,
+    @Deprecated('Use identityStore (VerifiedIdentityStore) instead')
     IdentityPinStore? identityPinStore,
-  }) : _identityPinStore = identityPinStore;
+    VerifiedIdentityStore? identityStore,
+  })  : _identityPinStore = identityPinStore,
+        _identityStore = identityStore {
+    if (identityPinStore != null && identityStore != null) {
+      throw ArgumentError(
+          'Pass either identityStore or the deprecated identityPinStore, not '
+          'both (migrate pins with VerifiedIdentityStore.importLegacyPin).');
+    }
+  }
+
+  /// The configured Identity Binding v1 store, if any.
+  VerifiedIdentityStore? get identityStore => _identityStore;
 
   // ---------------------------------------------------------------------------
   // Key Management
@@ -517,9 +911,23 @@ class SignalProtocolService {
   /// provided [preKeyBundle] fetched from the server.
   ///
   /// Performs X3DH as the initiator (Alice). Fails closed if the remote
-  /// Ed25519 identity key is missing (prevents MITM via bundle omission),
-  /// verifies the signed prekey signature, and runs a TOFU pin check via
-  /// [IdentityPinStore] if one was injected.
+  /// Ed25519 identity key is missing (prevents MITM via bundle omission) and
+  /// verifies the signed prekey signature. Then, BEFORE X3DH:
+  ///  - with an [identityStore]: identity admission. Optional bundle keys
+  ///    `identityBinding` ([IdentityBinding], parsed with
+  ///    [IdentityBinding.tryParseWire]), `identityBindingUnparseable` (bool)
+  ///    and `accountPublicKey` (Uint8List). A valid binding is verified and
+  ///    recorded (choose the device with [IdentityAdmission.selectDevice]
+  ///    when the server lists several); a missing binding goes through the
+  ///    latch check + legacy policy. Throws [IdentityBindingInvalidException]
+  ///    (terminal) or [IdentityKeyChangedException] (verified legacy peer
+  ///    changed keys — blocked until [VerifiedIdentityStore.acceptPendingChange]).
+  ///    Store I/O failures surface as a transient [SignalProtocolException].
+  ///  - with the deprecated [IdentityPinStore]: TOFU pin check.
+  ///
+  /// Admitting from a non-consuming identity directory first
+  /// ([IdentityAdmission.admitDirectory]) avoids consuming a one-time prekey
+  /// for a peer that will be refused.
   Future<void> createSession({
     required String recipientId,
     required String deviceId,
@@ -564,13 +972,29 @@ class SignalProtocolService {
       );
     }
 
-    // TOFU identity pin check (optional — only runs when a store is injected).
-    //   - First time we establish with this peer → store the Ed25519 key
-    //   - Subsequent times → constant-time compare; mismatch ⇒ refuse
-    await _tofuPinCheck(
-      sessionKey: sessionKey,
-      remoteIdentityKeyEd25519: remoteIdentityKeyEd25519,
-    );
+    if (_identityStore != null) {
+      // Identity Binding v1 admission BEFORE X3DH. Typed failures propagate
+      // untouched.
+      final admitted = await _admitForSend(
+        peerId: recipientId,
+        deviceId: deviceId,
+        identityKey: remoteIdentityKey,
+        ed25519: remoteIdentityKeyEd25519,
+        bundle: preKeyBundle,
+      );
+      if (admitted?.boundIdentityKey != null) {
+        _purgeSessionsNotMatching(
+            recipientId, admitted!.boundIdentityKey!, admitted.boundDeviceId);
+      }
+    } else {
+      // Deprecated TOFU identity pin check (only when a pin store is set).
+      //   - First time we establish with this peer → store the Ed25519 key
+      //   - Subsequent times → constant-time compare; mismatch ⇒ refuse
+      await _tofuPinCheck(
+        sessionKey: sessionKey,
+        remoteIdentityKeyEd25519: remoteIdentityKeyEd25519,
+      );
+    }
 
     // Extract optional one-time prekey
     Uint8List? remoteOneTimePreKey;
@@ -598,6 +1022,7 @@ class SignalProtocolService {
     session.isPreKeySession = true;
     session.preKeySignedPreKeyId = signedPreKeyData['keyId'] as int;
     session.preKeyOneTimePreKeyId = opkData?['keyId'] as int?;
+    session.remoteIdentityKey = Uint8List.fromList(remoteIdentityKey);
 
     // Append to multi-session list (LRU eviction inside).
     _appendSession(sessionKey, session);
@@ -664,16 +1089,15 @@ class SignalProtocolService {
   ///
   /// This is called internally during decryptMessage when messageType == 2.
   ///
-  /// Receive-side TOFU: when [remoteIdentityKeyEd25519] is supplied, enforce
-  /// the same TOFU pin check as [createSession] BEFORE consuming any SPK /
-  /// OPK material. A mismatch raises [IdentityKeyChangedException] so the
-  /// upper layers can dead-letter the envelope without installing an
-  /// attacker-controlled session.
+  /// With an [identityStore], identity admission has already run in
+  /// [decryptMessage] BEFORE this method touches any SPK/OPK material, so a
+  /// rejected sender cannot burn our one-time prekeys.
   ///
-  /// If [remoteIdentityKeyEd25519] is null we **fail-closed** to match the
-  /// send-side policy already in [createSession]. The caller is responsible
-  /// for fetching the sender's Ed25519 verify key from the prekey-bundle
-  /// endpoint before calling this path.
+  /// Without one (legacy model): when [remoteIdentityKeyEd25519] is
+  /// supplied, the deprecated TOFU pin check runs BEFORE consuming any SPK /
+  /// OPK material; if it is null we **fail-closed**. The caller is
+  /// responsible for fetching the sender's Ed25519 verify key from the
+  /// prekey-bundle endpoint before calling this path.
   Future<void> _receiveSession({
     required String sessionKey,
     required Uint8List remoteIdentityKey,
@@ -684,19 +1108,21 @@ class SignalProtocolService {
   }) async {
     _ensureIdentity();
 
-    // Receive-side TOFU. Run BEFORE we touch any one-time prekey so an
-    // attacker who triggers a mismatch cannot also burn through our OPKs.
-    if (remoteIdentityKeyEd25519 == null) {
-      throw SignalProtocolException(
-        'Pre-key envelope missing sender Ed25519 verify key — refusing to '
-        'establish receive session for '
-        '${_maskSessionKey(sessionKey)} (fail-closed)',
+    if (_identityStore == null) {
+      // Legacy receive-side TOFU. Run BEFORE we touch any one-time prekey so
+      // an attacker who triggers a mismatch cannot also burn our OPKs.
+      if (remoteIdentityKeyEd25519 == null) {
+        throw SignalProtocolException(
+          'Pre-key envelope missing sender Ed25519 verify key — refusing to '
+          'establish receive session for '
+          '${_maskSessionKey(sessionKey)} (fail-closed)',
+        );
+      }
+      await _tofuPinCheck(
+        sessionKey: sessionKey,
+        remoteIdentityKeyEd25519: remoteIdentityKeyEd25519,
       );
     }
-    await _tofuPinCheck(
-      sessionKey: sessionKey,
-      remoteIdentityKeyEd25519: remoteIdentityKeyEd25519,
-    );
 
     final spk = _signedPreKeys[signedPreKeyId];
     if (spk == null) {
@@ -744,7 +1170,7 @@ class SignalProtocolService {
       sharedSecret,
       spk.privateKey,
       spk.publicKey,
-    );
+    )..remoteIdentityKey = Uint8List.fromList(remoteIdentityKey);
 
     // Append to multi-session list. Existing sessions (e.g. from a prior
     // outgoing X3DH) are KEPT — they're needed to decrypt in-flight messages
@@ -752,7 +1178,7 @@ class SignalProtocolService {
     _appendSession(sessionKey, session);
 
     // Cache remote identity key for Sealed Sender seal().
-    final peerId = sessionKey.split(':').first;
+    final peerId = sessionKey.substring(0, sessionKey.lastIndexOf(':'));
     _remoteIdentityKeys[peerId] = Uint8List.fromList(remoteIdentityKey);
 
     debugPrint(
@@ -764,7 +1190,12 @@ class SignalProtocolService {
 
   /// Check whether we already have an active session with the given device.
   /// Returns true if at least one session exists in the peer's list.
+  ///
+  /// With an [identityStore], sessions that do not match the peer's bound
+  /// identity key are purged first (so they do not count and the caller
+  /// re-runs X3DH).
   Future<bool> hasSession(String recipientId, String deviceId) async {
+    await enforceBoundSessions(recipientId);
     final list = _sessions['$recipientId:$deviceId'];
     return list != null && list.isNotEmpty;
   }
@@ -783,6 +1214,9 @@ class SignalProtocolService {
   ///
   /// messageType: 1 = normal ciphertext, 2 = pre-key message (first message).
   ///
+  /// PreKey (type-2) messages carry our [LocalIdentityBinding] (see
+  /// [setLocalIdentityBinding]) while it covers the current identity keys.
+  ///
   /// IMPORTANT: Never log the plaintext content.
   Future<Map<String, dynamic>> encryptMessage({
     required String recipientId,
@@ -790,6 +1224,9 @@ class SignalProtocolService {
     required Uint8List plaintext,
   }) async {
     final sessionKey = '$recipientId:$deviceId';
+    // Never encrypt on a session whose remote IK differs from the peer's
+    // bound identity key.
+    await enforceBoundSessions(recipientId);
     // Use the most recently used session (list.last).
     final list = _sessions[sessionKey];
     if (list == null || list.isEmpty) {
@@ -803,6 +1240,21 @@ class SignalProtocolService {
     final encrypted = session.encrypt(plaintext);
     final isPreKey = session.isPreKeySession;
 
+    // Embed our account-signed binding in every PreKey message, but only
+    // while it covers our CURRENT identity + Ed25519 keys.
+    EmbeddedIdentityBinding? embedded;
+    final local = _localBinding;
+    final ikNow = _identityKeyPair?.publicKey;
+    final edNow = _identityVerifyKey;
+    if (isPreKey &&
+        local != null &&
+        ikNow != null &&
+        edNow != null &&
+        constantTimeEquals(local.identityKey, ikNow) &&
+        constantTimeEquals(local.ed25519, edNow)) {
+      embedded = local.embedded;
+    }
+
     // Serialize the encrypted message into a transport format
     final payload = _serializeEncryptedMessage(
       encrypted,
@@ -811,6 +1263,7 @@ class SignalProtocolService {
       ephemeralKey: isPreKey ? session.ephemeralPublicKey : null,
       signedPreKeyId: isPreKey ? session.preKeySignedPreKeyId : null,
       oneTimePreKeyId: isPreKey ? session.preKeyOneTimePreKeyId : null,
+      identityBinding: embedded,
     );
 
     // Do NOT clear the prekey state here. libsignal keeps emitting PreKey
@@ -853,12 +1306,32 @@ class SignalProtocolService {
   /// [messageType] indicates the Signal message type
   /// (1 = ciphertext, 2 = pre-key message).
   ///
+  /// ### With an [identityStore] (Identity Binding v1)
+  /// For type 2, BEFORE any new session is derived:
+  ///  - the sender's embedded binding is verified offline: signature over
+  ///    ([senderId], binding deviceId, epoch, X3DH header IK, binding Ed),
+  ///    binding deviceId == [envelopeDeviceId] (the device named by the
+  ///    envelope / sealed sender certificate — pass it whenever the
+  ///    transport authenticates one), and the epoch latch;
+  ///  - no embedded binding: latched sender -> rejected (downgrade); known
+  ///    legacy sender -> legacy policy on the header IK (no network);
+  ///    unknown sender -> [identityDirectoryLookup] (a NON-consuming identity
+  ///    lookup; cache it per sender) decides between bound and legacy. It is
+  ///    only invoked when no existing session decrypts the message.
+  /// For a bound sender, sessions whose remote IK differs from the bound IK
+  /// are purged before any trial decrypt, including archived ones.
+  /// [senderIdentityKeyEd25519] must NOT be passed in this mode
+  /// ([ArgumentError]): server-supplied Ed25519 keys are exactly what the
+  /// binding replaces.
+  ///
+  /// ### Without an identity store (legacy)
   /// [senderIdentityKeyEd25519] is REQUIRED whenever [messageType] == 2
   /// and the trial-decrypt path falls through to [_receiveSession]. The
   /// caller fetches it from the prekey-bundle endpoint so receive-side
   /// TOFU can run BEFORE we install an attacker-controlled session. For
   /// [messageType] == 1 (and for prekey envelopes that match an already-
-  /// existing session), this argument is ignored.
+  /// existing session), this argument is ignored. Embedded bindings are
+  /// ignored in this mode.
   ///
   /// IMPORTANT: Never log the returned plaintext.
   Future<Uint8List> decryptMessage({
@@ -867,8 +1340,16 @@ class SignalProtocolService {
     required Uint8List ciphertext,
     required int messageType,
     Uint8List? senderIdentityKeyEd25519,
+    String? envelopeDeviceId,
+    Future<RemoteIdentityDirectory?> Function()? identityDirectoryLookup,
   }) async {
     final sessionKey = '$senderId:$deviceId';
+    if (_identityStore != null && senderIdentityKeyEd25519 != null) {
+      throw ArgumentError(
+          'senderIdentityKeyEd25519 is not used with an identityStore — the '
+          "sender's identity is verified from its binding (or via "
+          'identityDirectoryLookup for binding-less senders).');
+    }
 
     if (messageType == 2) {
       // Pre-key message handling.
@@ -888,6 +1369,24 @@ class SignalProtocolService {
         );
       }
 
+      // Identity Binding v1: offline admission first (embedded binding or
+      // known legacy sender). A null result means "unknown binding-less
+      // sender" — resolved with the directory lookup only if no existing
+      // session decrypts the message.
+      var admitted = await _admitForReceive(
+        peerId: senderId,
+        sessionDeviceId: deviceId,
+        envelopeDeviceId: envelopeDeviceId,
+        parsed: parsed,
+        directoryLookup: null,
+      );
+      if (admitted?.boundIdentityKey != null) {
+        _purgeSessionsNotMatching(
+            senderId, admitted!.boundIdentityKey!, admitted.boundDeviceId);
+      } else {
+        await enforceBoundSessions(senderId);
+      }
+
       final existing = _sessions[sessionKey];
       if (existing != null && existing.isNotEmpty) {
         final result = _trialDecrypt(existing, parsed.encryptedMessage);
@@ -903,11 +1402,25 @@ class SignalProtocolService {
         }
       }
 
-      // No existing session decrypted → derive new from prekey msg.
-      // Hand the sender's Ed25519 verify key down so _receiveSession can
-      // run TOFU pin checks BEFORE consuming our SPK/OPK material.
-      // _receiveSession will throw IdentityKeyChangedException (typed) on
-      // mismatch or SignalProtocolException if the key is missing.
+      // No existing session decrypted → a new session will be derived. An
+      // unknown binding-less sender is resolved now (non-consuming lookup).
+      if (admitted == null && _identityStore != null) {
+        admitted = await _admitForReceive(
+          peerId: senderId,
+          sessionDeviceId: deviceId,
+          envelopeDeviceId: envelopeDeviceId,
+          parsed: parsed,
+          directoryLookup: identityDirectoryLookup ?? () async => null,
+        );
+        if (admitted?.boundIdentityKey != null) {
+          _purgeSessionsNotMatching(
+              senderId, admitted!.boundIdentityKey!, admitted.boundDeviceId);
+        }
+      }
+
+      // Legacy mode: hand the sender's Ed25519 verify key down so
+      // _receiveSession can run TOFU pin checks BEFORE consuming our SPK/OPK
+      // material.
       //
       // Persistent-PreKey reset-race guard: now that the initiator sustains
       // type-2 until the peer replies, a re-sent type-2 can arrive after we
@@ -916,10 +1429,10 @@ class SignalProtocolService {
       // BEFORE we reach the new-session archive fallback below. The same
       // in-flight message, had it been type-1, would have hit the type-1
       // archive fallback and recovered. Give type-2 the same recovery: on a
-      // _receiveSession failure that is NOT a TOFU identity mismatch, consult
-      // the archive before rethrowing. An IdentityKeyChangedException MUST
-      // still propagate untouched so it routes to identity-change handling —
-      // never silently archive-fallback past it.
+      // _receiveSession failure that is NOT an identity rejection, consult
+      // the archive before rethrowing. IdentityKeyChangedException /
+      // IdentityBindingInvalidException MUST propagate untouched so they
+      // route to identity handling — never silently archive-fallback past.
       try {
         await _receiveSession(
           sessionKey: sessionKey,
@@ -930,6 +1443,8 @@ class SignalProtocolService {
           remoteIdentityKeyEd25519: senderIdentityKeyEd25519,
         );
       } on IdentityKeyChangedException {
+        rethrow;
+      } on IdentityBindingInvalidException {
         rethrow;
       } catch (_) {
         final archivedResult =
@@ -965,7 +1480,11 @@ class SignalProtocolService {
       }
     }
 
-    // Normal ciphertext message: short-circuit if there is nothing to try.
+    // Normal ciphertext message. A bound peer's sessions with a different
+    // remote IK (active or archived) are purged first — never used.
+    await enforceBoundSessions(senderId);
+
+    // Short-circuit if there is nothing to try.
     final list = _sessions[sessionKey];
     final archived = _archivedSessions[sessionKey];
     final hasActive = list != null && list.isNotEmpty;
@@ -1441,6 +1960,38 @@ class SignalProtocolService {
         }
       }
 
+      // Sessions persisted before 0.3.0 carry no remoteIdentityKey and are
+      // deliberately NOT labelled here — the per-peer latest IK is wrong for
+      // sessions of an older install. They are classified lazily against a
+      // bound identity (enforceBoundSessions).
+
+      // One-time IK seeding of legacy identity records from the learned
+      // remote identity keys (guarded by a store marker). Non-fatal.
+      final identityStore = _identityStore;
+      if (identityStore != null && _remoteIdentityKeys.isNotEmpty) {
+        try {
+          // Carry the device each IK was learned from (session key).
+          final deviceIds = <String, String>{};
+          for (final key in _sessions.keys) {
+            final colon = key.lastIndexOf(':');
+            if (colon <= 0) continue;
+            final peer = key.substring(0, colon);
+            final ik = _remoteIdentityKeys[peer];
+            final ikMatches = ik != null &&
+                _sessions[key]!.any((sess) =>
+                    sess.remoteIdentityKey == null ||
+                    _constantTimeBytesEqual(sess.remoteIdentityKey!, ik));
+            if (ikMatches) deviceIds[peer] = key.substring(colon + 1);
+          }
+          await identityStore.seedLegacyIdentityKeys(
+              Map<String, Uint8List>.from(_remoteIdentityKeys),
+              deviceIds: deviceIds);
+        } catch (e) {
+          debugPrint('[SignalProtocolService] legacy IK seeding deferred: '
+              '${e.runtimeType}');
+        }
+      }
+
       // SKDM tracker is in-memory only — never restored from disk. Reactive
       // sender_key_request handles any cross-restart misses.
       _skdmTracker = SenderKeyDistributionTracker();
@@ -1475,6 +2026,7 @@ class SignalProtocolService {
     Uint8List? ephemeralKey,
     int? signedPreKeyId,
     int? oneTimePreKeyId,
+    EmbeddedIdentityBinding? identityBinding,
   }) {
     final msgJson = encrypted.toJson();
     if (isPreKey && identityKey != null && ephemeralKey != null) {
@@ -1486,6 +2038,11 @@ class SignalProtocolService {
       if (oneTimePreKeyId != null) {
         msgJson['oneTimePreKeyId'] = oneTimePreKeyId;
       }
+      // Our account-signed binding. Receivers before 0.3.0 ignore unknown
+      // keys.
+      if (identityBinding != null) {
+        msgJson['identityBinding'] = identityBinding.toJson();
+      }
     }
     return Uint8List.fromList(utf8.encode(jsonEncode(msgJson)));
   }
@@ -1493,7 +2050,13 @@ class SignalProtocolService {
   /// Parse a pre-key message to extract X3DH params and inner encrypted message.
   _PreKeyMessageData _deserializePreKeyMessage(Uint8List data) {
     final json = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
+    final rawBinding = json['identityBinding'];
+    final binding = rawBinding == null
+        ? null
+        : EmbeddedIdentityBinding.tryParse(rawBinding);
     return _PreKeyMessageData(
+      binding: binding,
+      bindingUnparseable: rawBinding != null && binding == null,
       identityKey: _hexToBytes(json['identityKey'] as String),
       ephemeralKey: _hexToBytes(json['ephemeralKey'] as String),
       signedPreKeyId: json['signedPreKeyId'] as int? ?? 1,
@@ -1628,6 +2191,11 @@ class _ArchivedSessionEntry {
 }
 
 class _PreKeyMessageData {
+  /// Sender's embedded binding (null when absent or unparseable).
+  final EmbeddedIdentityBinding? binding;
+
+  /// True when an `identityBinding` field was present but malformed.
+  final bool bindingUnparseable;
   final Uint8List identityKey;
   final Uint8List ephemeralKey;
   final int signedPreKeyId;
@@ -1635,6 +2203,8 @@ class _PreKeyMessageData {
   final EncryptedMessage encryptedMessage;
 
   _PreKeyMessageData({
+    required this.binding,
+    required this.bindingUnparseable,
     required this.identityKey,
     required this.ephemeralKey,
     required this.signedPreKeyId,
