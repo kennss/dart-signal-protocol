@@ -1,18 +1,19 @@
 /// @file        message_send_log.dart
-/// @description 메시지 재전송용 발신 로그 — 복호화 실패 시 retry request에 응답하기 위해 최근 메시지 평문을 암호화 저장 (1:1 + 그룹 모두 지원)
+/// @description Outgoing message log for retransmission — stores recent message plaintexts (encrypted at rest) to respond to retry requests on decrypt failure (supports both 1:1 and group)
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-04
-/// @lastUpdated 2026-04-20
+/// @lastUpdated 2026-11-10 (backport SnowChat faf645d: addAlias() for server-assigned message IDs; header translated to English)
 ///
 /// @functions
-///  - MessageSendLog: 발신 메시지 로그 (LRU, 암호화, TTL)
-///  - record(): 메시지 기록 (1:1 + 그룹 통합 API)
-///  - lookup(): 메시지 조회
-///  - conversationIdFor(): 메시지의 conversationId 조회
-///  - isGroupMessage(): 메시지가 그룹 메시지인지 확인
-///  - toJson(): 영속화용 직렬화
-///  - fromJson(): 영속화된 상태 복원 (기존 groupId 필드 하위 호환)
+///  - MessageSendLog: Outgoing message log (LRU, encrypted, TTL)
+///  - record(): Record a message (unified API for 1:1 + group)
+///  - lookup(): Look up a message
+///  - addAlias(): Register a secondary lookup key (e.g. server-assigned id) for an existing entry
+///  - conversationIdFor(): Get the conversationId for a message
+///  - isGroupMessage(): Check whether a message is a group message
+///  - toJson(): Serialize for persistence
+///  - fromJson(): Restore persisted state (backward compatible with old groupId field)
 
 import 'dart:collection';
 import 'dart:convert';
@@ -76,6 +77,27 @@ class MessageSendLog {
       return null;
     }
     return entry.plaintext;
+  }
+
+  /// Register a secondary lookup key for an existing entry.
+  ///
+  /// Use this when the transport assigns a different message id (e.g. a
+  /// server-generated id) than the client's locally-generated one used in
+  /// [record]. Peers send retry requests with the id THEY saw — typically the
+  /// server's — so without this alias [lookup] returns null and the retry
+  /// pipeline silently skips, leaving a broken session unrepaired (observed
+  /// in SnowChat as a two-device retry deadlock).
+  ///
+  /// No-op when [primaryId] equals [aliasId] or when no entry exists for
+  /// [primaryId]. The alias references the same entry (same plaintext,
+  /// conversation and timestamp), so it expires together with the primary.
+  /// An alias occupies its own LRU slot and is persisted by [toJson] like any
+  /// other key.
+  void addAlias(String primaryId, String aliasId) {
+    if (primaryId == aliasId) return;
+    final entry = _log[primaryId];
+    if (entry == null) return;
+    _log[aliasId] = entry;
   }
 
   /// Get the conversationId for a logged message.
