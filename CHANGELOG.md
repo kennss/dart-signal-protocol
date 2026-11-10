@@ -5,6 +5,98 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-alpha.1] - 2026-11-10
+
+Second backport from the reference SnowChat deployment. These fixes had been
+running in the SnowChat app since May–August 2026 but were only present in
+the app's copy of the crypto code; this release brings the published library
+back in line with it. Each fix is covered by a new regression test in
+`test/signal_protocol_service_test.dart`.
+
+### ⚠️ Breaking
+
+- **X3DH HKDF info is now domain-separated by path** (SnowChat `ddfbe6d`).
+  The unified `SnowChat_X3DH` info string is replaced by
+  `SnowChat_X3DH_4DH` (no one-time prekey) and `SnowChat_X3DH_5DH` (with a
+  one-time prekey). A silent mismatch between initiator and responder on
+  whether an OPK was used now fails on the first AEAD check instead of
+  deriving a quietly wrong shared secret. **0.2.x and 0.3.x peers cannot
+  establish NEW sessions with each other.** Existing Double Ratchet sessions
+  are unaffected (the ratchet never re-runs X3DH HKDF). Upgrade all peers
+  together.
+- **`saveSessionStore` returns `Future<bool>`** (was `Future<void>`) — see
+  Changed. Callers that ignore the result keep compiling.
+
+### Fixed
+
+- **First-contact Sealed Sender messages were lost** (SnowChat `c062a09`).
+  Sealed Sender hides the inner Signal message type from the transport, so a
+  receiver that took `messageType` from the transport (defaulting to 1)
+  misrouted the first prekey message from a new contact as a normal message;
+  the X3DH responder branch never ran and the message could never be
+  decrypted. New `SignalProtocolService.resolveSealedMessageType(drCiphertext,
+  certIdentityKey)` derives the type from the self-describing DR ciphertext
+  (prekey messages carry `identityKey` + `ephemeralKey`; normal messages
+  never do). Non-JSON input degrades to type 1.
+- **Receive-first bootstrap failed if the first PreKey message was lost**
+  (SnowChat `dc71736`). `encryptMessage` used to clear the pending-PreKey
+  state after the first send, so every later message was type-1 and a peer
+  that never received the first one could not build the inbound session.
+  The initiator now keeps emitting PreKey (type-2) messages until it
+  successfully decrypts an inbound message on that specific session
+  (libsignal behavior). The retire is per-session, never per-peer, so
+  concurrent-initiation (glare) sessions are not flipped to type-1
+  prematurely. The pending state is persisted in the session store.
+- **Re-sent PreKey message after a reset was undecryptable** (SnowChat
+  `dc71736`). A type-2 message whose one-time prekey was already consumed
+  now falls back to archived sessions (as type-1 messages already did)
+  before failing. `IdentityKeyChangedException` still propagates untouched.
+- **Missing one-time prekey silently downgraded X3DH to 4-DH** (SnowChat
+  `ddfbe6d`). When a PreKey message names a one-time prekey that is not in
+  the local store, `decryptMessage` now throws `SignalProtocolException`
+  instead of deriving a mismatched shared secret and installing a
+  permanently broken session.
+- **Torn session-store writes** (SnowChat `591d0b9`). `saveSessionStore`
+  now writes to a uniquely-named temp file and renames it over the target,
+  so a crash mid-write or two concurrent saves can no longer leave a
+  corrupt ciphertext that loses every session on the next load.
+
+### Added
+
+- **Sealed Sender Step 9 identity cross-check** (SnowChat `c062a09`).
+  `resolveSealedMessageType` rejects a prekey message whose X3DH identity
+  key does not equal the identity in the server-signed sender certificate
+  (constant-time compare, opaque `StateError('Sealed message rejected')`).
+  This check was documented in `sealed_sender.dart` but never implemented
+  before.
+- **Signed-prekey self-heal accessors** (SnowChat `591d0b9`):
+  `signedPreKeyPublicKey(keyId)` and `hasAnySignedPreKey`. They let the
+  caller detect that the signed prekey its server advertises is not held
+  locally (which makes every receive-first X3DH fail with "Signed prekey N
+  not found") and re-arm it. The reconcile policy itself (when to rotate,
+  server comparison, counters) stays in the application, because it needs
+  the caller's server API and secure storage.
+- **`MessageSendLog.addAlias(primaryId, aliasId)`** (SnowChat `faf645d`).
+  Registers a second lookup key (typically the server-assigned message id)
+  for an existing entry so retry requests that reference the server id can
+  be answered.
+
+### Changed
+
+- **`saveSessionStore` returns whether bytes reached disk.** `false` when no
+  store encryption key is set or the write failed. Callers that upload
+  prekeys should persist first and refuse to upload on `false`
+  (persist-before-advertise).
+
+### Not included
+
+- The SnowChat app's TOFU identity-pin keying and Safety Number computation
+  are being reworked separately and are not part of this release.
+- App-only orchestration from the same SnowChat commits (session-manager
+  signed-prekey reconcile, prekey upload mutex, message-queue placeholders,
+  server-side atomic OPK consume / replace) is application or server logic
+  and is intentionally not in this library.
+
 ## [0.2.0-alpha.1] - 2026-04-20
 
 Backport of hardening work done on the reference SnowChat deployment

@@ -8,7 +8,7 @@
 
 `dart_signal_protocol` delivers the **full Signal Protocol stack in Pure Dart**: X3DH key agreement, Double Ratchet messaging, Sender Key group encryption, and **Sealed Sender** (sender anonymity). No Platform Channels, no native binaries, no JNI/Swift bridges — one codebase that runs identically on iOS, Android, Desktop, and Dart VM targets.
 
-This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@calidalab.ai)**, an E2EE messenger with 1:1 and group conversations (up to 1024 members). SnowChat has been running the hardened service-layer version of this code in production. The public package (`0.2.0-alpha.1`) contains the backport of those hardenings plus documentation of the residual risks — please read [`§ Known Risks Before You Use`](#known-risks-before-you-use) before adopting.
+This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@calidalab.ai)**, an E2EE messenger with 1:1 and group conversations (up to 1024 members). SnowChat has been running the hardened service-layer version of this code in production. The public package (`0.3.0-alpha.1`) contains the backport of those hardenings (most recently the August 2026 receive-first / Sealed Sender first-contact fixes) plus documentation of the residual risks — please read [`§ Known Risks Before You Use`](#known-risks-before-you-use) before adopting.
 
 **One dependency. ~4,000 lines. Full Signal Protocol.**
 
@@ -101,7 +101,8 @@ A platform-agnostic session-store adapter is on the roadmap. If you need Web tod
 All domain-separation labels are constants:
 
 ```dart
-_x3dhInfo        = "SnowChat_X3DH"
+_x3dhInfo4DH     = "SnowChat_X3DH_4DH"   // X3DH without one-time prekey
+_x3dhInfo5DH     = "SnowChat_X3DH_5DH"   // X3DH with one-time prekey (since 0.3.0)
 _rkInfo          = "SnowChat_Ratchet"
 _sealedSenderInfo = "SnowChat_SealedSender_v1"
 ```
@@ -287,6 +288,7 @@ The library does **not** depend on Flutter. `SignalProtocolService` imports `dar
 - **Group messaging extensions**: Multi-State SenderKeyRecord (5 generations), out-of-order cache, chain_id wire field, distribution tracker, origin SKDM cache, corrupt-recovery removal.
 - **Sealed Sender**: sender anonymity via ephemeral X25519 DH with HKDF key derivation, XSalsa20-Poly1305 encryption, in-memory replay cache (10K entries, 24h TTL), random padding, and Ed25519 server-signed sender certificates.
 - **Service-layer hardenings** (backported from SnowChat v0.2.0-alpha.1): multi-session storage per peer, archived sessions with TTL, snapshot/restore trial-decrypt, TOFU identity pin interface, plaintext-save refusal.
+- **Receive-first robustness** (backported in 0.3.0-alpha.1): persistent PreKey messages until the peer replies, sealed messageType recovery + Sealed Sender Step 9 identity cross-check, one-time-prekey fail-loud, 4DH/5DH X3DH domain separation, atomic session-store writes, signed-prekey self-heal accessors.
 
 ### Not implemented
 
@@ -378,6 +380,7 @@ This library is built on the shoulders of:
 - [x] Sealed Sender support (`0.2.0-alpha`)
 - [x] Service-layer hardenings backport (`0.2.0-alpha.1`) — archived sessions, trial-decrypt, TOFU pin interface, plaintext-save refusal
 - [x] Public disclosure of residual risks (this README update)
+- [x] Receive-first / Sealed Sender first-contact fixes backport (`0.3.0-alpha.1`) — **wire-breaking for new X3DH sessions with 0.2.x peers**
 - [ ] Persistent Sealed Sender replay cache
 - [ ] Platform-agnostic session-store adapter (Flutter Web unblock)
 - [ ] Configurable HKDF info labels
