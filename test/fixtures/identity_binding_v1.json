@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "note": "Shared golden vectors for Identity Binding v1 \u2014 byte-identical to the SnowChat reference deployment (server identityBinding.ts and app identity_binding.dart). Generated deterministically from fixed seeds. Peer ids use the default SnowChatIdScheme.",
+  "valid": {
+    "snowId": "snowe4030998cfd5ad1723c169f956aa0b9e",
+    "accountPublicKeyHex": "e4030998cfd5ad1723c169f956aa0b9eb8619b5992bd612c2af428ebc79f8df0",
+    "deviceId": "3f2a9c1e-5b7d-4e8a-9c21-7d4e5f6a8b90",
+    "epoch": "1794326400000",
+    "identityKeyHex": "bb50ff9e82a574cfbf820e97f60fb9c143ec7415cf514f8cfd98eff59e059614",
+    "ed25519Hex": "ed63130feea84741fa8851b93eadff95eb6cd11db819f8650c1259b4118a30f4",
+    "messageHex": "ff536e6f77436861745f4964656e7469747942696e64696e675f7631736e6f77653430333039393863666435616431373233633136396639353661613062396533663261396331652d356237642d346538612d396332312d376434653566366138623930000001a1c6300c00bb50ff9e82a574cfbf820e97f60fb9c143ec7415cf514f8cfd98eff59e059614ed63130feea84741fa8851b93eadff95eb6cd11db819f8650c1259b4118a30f4",
+    "signatureHex": "f4d6f43b89e8a300eefbe5358b57217a3d22aeab59d4b0efb2d6185d46949688b9e81c6f49d13e4d7cc5be73313f76146bb378608097406e9c5a3f52823ca001"
+  },
+  "invalid": [
+    {
+      "name": "tampered_signature",
+      "override": {
+        "signatureHex": "f5d6f43b89e8a300eefbe5358b57217a3d22aeab59d4b0efb2d6185d46949688b9e81c6f49d13e4d7cc5be73313f76146bb378608097406e9c5a3f52823ca001"
+      }
+    },
+    {
+      "name": "tampered_identity_key",
+      "override": {
+        "identityKeyHex": "ba50ff9e82a574cfbf820e97f60fb9c143ec7415cf514f8cfd98eff59e059614"
+      }
+    },
+    {
+      "name": "tampered_ed25519",
+      "override": {
+        "ed25519Hex": "ec63130feea84741fa8851b93eadff95eb6cd11db819f8650c1259b4118a30f4"
+      }
+    },
+    {
+      "name": "tampered_epoch",
+      "override": {
+        "epoch": "1794326400001"
+      }
+    },
+    {
+      "name": "other_device",
+      "override": {
+        "deviceId": "00000000-0000-4000-8000-000000000000"
+      }
+    },
+    {
+      "name": "account_key_not_matching_snowid",
+      "override": {
+        "accountPublicKeyHex": "5d130de8527df4df802812f4726d29236feb8e22e6a8ae43849fc46a3537045a"
+      }
+    },
+    {
+      "name": "uppercase_device_id",
+      "override": {
+        "deviceId": "3F2A9C1E-5B7D-4E8A-9C21-7D4E5F6A8B90"
+      }
+    },
+    {
+      "name": "short_identity_key",
+      "override": {
+        "identityKeyHex": "bb50ff9e82a574cfbf820e97f60fb9c143ec7415cf514f8cfd98eff59e0596"
+      }
+    }
+  ]
+}
