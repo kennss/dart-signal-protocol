@@ -1,9 +1,9 @@
 /// @file        integration_test.dart
-/// @description E2E 통합 테스트. 전체 1:1 메시징 플로우, 그룹 메시징 플로우, 혼합 시나리오
+/// @description E2E integration tests. Full 1:1 messaging flow, group messaging flow, mixed scenarios
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
 ///
 /// @functions
 ///  - Full E2E: Alice and Bob initialize, create session, exchange 5 messages
@@ -69,7 +69,9 @@ void main() {
         deviceId: 'device-1',
         plaintext: Uint8List.fromList(utf8.encode('Message 2')),
       );
-      expect(enc2['messageType'], 1); // normal message now
+      // Persistent PreKey (0.3.0): Alice has not yet decrypted anything from
+      // Bob, so she keeps emitting PreKey (type-2) messages until Bob replies.
+      expect(enc2['messageType'], 2);
       final dec2 = await bob.decryptMessage(
         senderId: 'alice',
         deviceId: 'device-1',
@@ -92,12 +94,16 @@ void main() {
       );
       expect(utf8.decode(dec3), 'Bob reply 1');
 
+      // Alice decrypted an inbound message on the session, so her pending
+      // PreKey state is retired and later messages are normal (type-1).
+
       // Alice -> Bob
       final enc4 = await alice.encryptMessage(
         recipientId: 'bob',
         deviceId: 'device-1',
         plaintext: Uint8List.fromList(utf8.encode('Message 4')),
       );
+      expect(enc4['messageType'], 1);
       final dec4 = await bob.decryptMessage(
         senderId: 'alice',
         deviceId: 'device-1',

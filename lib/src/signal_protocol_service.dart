@@ -1,29 +1,32 @@
 /// @file        signal_protocol_service.dart
-/// @description Signal Protocol 순수 Dart 구현체. X3DH, Double Ratchet, Sender Key, PreKey 관리를 pinenacl 기반으로 구현
+/// @description Pure Dart implementation of the Signal Protocol. X3DH, Double Ratchet, Sender Key and PreKey management built on pinenacl
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-29
-/// @lastUpdated 2026-04-20 (backport: multi-session per peer, archived sessions, trial-decrypt with snapshot/restore, TOFU identity pin, plaintext-fallback refuse)
+/// @lastUpdated 2026-11-10 (backport SnowChat c062a09/dc71736/591d0b9/ddfbe6d: resolveSealedMessageType() + Sealed Sender Step 9, persistent PreKey until first inbound decrypt, type-2 archive fallback, OPK fail-loud, saveSessionStore -> Future<bool> with atomic write, signedPreKeyPublicKey()/hasAnySignedPreKey for SPK self-heal; header translated to English)
 ///
 /// @functions
-///  - SignalProtocolService: Signal Protocol 순수 Dart 구현 클래스
-///  - SignalProtocolService.generateIdentityKeyPair(): X25519 ID 키쌍 생성
-///  - SignalProtocolService.generateSignedPreKey(): 서명된 프리키 생성
-///  - SignalProtocolService.generateOneTimePreKeys(): 일회용 프리키 배치 생성 (Isolate offload 옵션)
-///  - SignalProtocolService.getPreKeyBundle(): 서버 업로드용 PreKey 번들 조회
-///  - SignalProtocolService.createSession(): X3DH로 새 세션 생성 (TOFU 검증 포함)
-///  - SignalProtocolService.hasSession(): 세션 존재 여부 확인
-///  - SignalProtocolService.deleteSession(): 세션 삭제
-///  - SignalProtocolService.archiveSession(): 세션 아카이브 (삭제 대신 임시 보관, 1시간 TTL)
-///  - SignalProtocolService.encryptMessage(): Double Ratchet 메시지 암호화
-///  - SignalProtocolService.decryptMessage(): Double Ratchet 복호화 — trial-decrypt + 아카이브 fallback
-///  - SignalProtocolService.createSenderKey(): 그룹용 Sender Key 생성
-///  - SignalProtocolService.processSenderKey(): 그룹 Sender Key 처리
-///  - SignalProtocolService.encryptGroupMessage(): 그룹 메시지 암호화
-///  - SignalProtocolService.decryptGroupMessage(): 그룹 메시지 복호화
-///  - SignalProtocolService.saveSessionStore(): 세션 상태 JSON 직렬화 저장 (아카이브 세션 포함)
-///  - SignalProtocolService.loadSessionStore(): 세션 상태 JSON 역직렬화 로드 (아카이브 세션 복원 + TTL 체크)
-///  - SignalProtocolException: Signal Protocol 예외 클래스
+///  - SignalProtocolService: Pure Dart Signal Protocol implementation class
+///  - SignalProtocolService.generateIdentityKeyPair(): Generate X25519 identity keypair
+///  - SignalProtocolService.generateSignedPreKey(): Generate a signed prekey
+///  - SignalProtocolService.generateOneTimePreKeys(): Generate a batch of one-time prekeys (optional Isolate offload)
+///  - SignalProtocolService.getPreKeyBundle(): Get the server-upload PreKey bundle
+///  - SignalProtocolService.signedPreKeyPublicKey(): Public key of a locally-held signed prekey (SPK self-heal reconcile)
+///  - SignalProtocolService.hasAnySignedPreKey: Whether any signed prekey private key is held locally
+///  - SignalProtocolService.createSession(): Create a new session via X3DH (with TOFU check)
+///  - SignalProtocolService.hasSession(): Check whether a session exists
+///  - SignalProtocolService.deleteSession(): Delete a session
+///  - SignalProtocolService.archiveSession(): Archive a session (temporary retention instead of delete, 1h TTL)
+///  - SignalProtocolService.encryptMessage(): Double Ratchet message encryption (keeps emitting PreKey/type-2 until the peer replies)
+///  - SignalProtocolService.decryptMessage(): Double Ratchet decryption — trial-decrypt + archived-session fallback; retires pending-PreKey state on inbound success
+///  - SignalProtocolService.resolveSealedMessageType(): Recover Signal messageType from an unsealed DR ciphertext + Sealed Sender Step 9 identity cross-check
+///  - SignalProtocolService.createSenderKey(): Create a group Sender Key
+///  - SignalProtocolService.processSenderKey(): Process a group Sender Key
+///  - SignalProtocolService.encryptGroupMessage(): Encrypt a group message
+///  - SignalProtocolService.decryptGroupMessage(): Decrypt a group message
+///  - SignalProtocolService.saveSessionStore(): Atomically save encrypted session state (including archived sessions); returns whether bytes reached disk
+///  - SignalProtocolService.loadSessionStore(): Load session state (restore archived sessions + TTL check)
+///  - SignalProtocolException: Signal Protocol exception class
 
 import 'dart:async';
 import 'dart:convert';
@@ -348,6 +351,25 @@ class SignalProtocolService {
 
   /// Generated one-time prekeys (private keys kept for session establishment).
   final Map<int, OneTimePreKey> _oneTimePreKeys = {};
+
+  /// Public key of the locally-held signed prekey [keyId], or `null` if we do
+  /// not hold its private key.
+  ///
+  /// Used for signed-prekey self-heal: on startup the caller compares the
+  /// signed prekey its server currently ADVERTISES (id + public key) against
+  /// the local store. If the local store lacks that exact public key, the
+  /// device is advertising a prekey it can no longer decrypt with, and every
+  /// receive-first X3DH from a new contact would fail with "Signed prekey N
+  /// not found". The caller should then generate + persist + re-advertise a
+  /// fresh signed prekey. Compare by public key, not id, so a same-id /
+  /// different-key collision is also caught.
+  Uint8List? signedPreKeyPublicKey(int keyId) =>
+      _signedPreKeys[keyId]?.publicKey;
+
+  /// Whether any signed prekey private key is held locally. Fallback signal
+  /// for signed-prekey self-heal when the server cannot report which signed
+  /// prekey it advertises.
+  bool get hasAnySignedPreKey => _signedPreKeys.isNotEmpty;
 
   /// Registration ID for this device.
   int? _registrationId;
@@ -690,6 +712,23 @@ class SignalProtocolService {
         opkPrivate = opk.privateKey;
         // One-time prekeys are single-use — remove after consumption
         _oneTimePreKeys.remove(oneTimePreKeyId);
+      } else {
+        // Fail loud: the sender's bundle named a one-time prekey we no longer
+        // hold. Going ahead with opkPrivate=null would silently drop X3DH from
+        // 5-DH to 4-DH while the sender ran the 5-DH path, so both sides would
+        // derive different shared secrets and every message would stay
+        // undecryptable until a session reset. Throwing lets the caller's
+        // decrypt-failure path (archive / reset / retry) recover instead of
+        // caching a permanently-poisoned session. The root cause is upstream
+        // (server OPK race, or a crash between upload and persist); this
+        // guard makes the symptom recoverable. Only prekey IDs are logged —
+        // never key material.
+        throw SignalProtocolException(
+          'One-time prekey #$oneTimePreKeyId requested by sender but not in '
+          'local store (available: ${_oneTimePreKeys.keys.toList()}). '
+          'Refusing X3DH 4-DH fallthrough — would yield a mismatched shared '
+          'secret.',
+        );
       }
     }
 
@@ -774,16 +813,40 @@ class SignalProtocolService {
       oneTimePreKeyId: isPreKey ? session.preKeyOneTimePreKeyId : null,
     );
 
-    // After first message, no longer a prekey session
-    if (isPreKey) {
-      session.isPreKeySession = false;
-      session.ephemeralPublicKey = null;
-    }
+    // Do NOT clear the prekey state here. libsignal keeps emitting PreKey
+    // (type-2) messages until the initiator DECRYPTS an inbound message from
+    // the peer (proof the peer bootstrapped the session) — see
+    // _clearPrekeyState, called from decryptMessage's inbound-success paths.
+    // Clearing after the first SEND (the pre-0.3.0 behavior) made every later
+    // message type-1, so a receive-first peer whose only bootstrap-capable
+    // (type-2) message was lost could never establish the inbound session.
+    // Emitting the same X3DH header repeatedly is safe: the receiver consumes
+    // the one-time prekey exactly once (decryptMessage trials the existing
+    // session before _receiveSession) and the send chain advances normally —
+    // only the wire wrapper differs.
 
     return {
       'ciphertext': payload,
       'messageType': isPreKey ? 2 : 1,
     };
+  }
+
+  /// Retire a session's pending-PreKey state once the peer has proven they
+  /// bootstrapped it (i.e. we successfully decrypted an INBOUND message on
+  /// it). After this, [encryptMessage] emits normal (type-1) messages for the
+  /// session. Idempotent: a no-op on receiver / already-established sessions.
+  ///
+  /// MUST be called ONLY on the specific session that decrypted the inbound
+  /// message (never a blanket clear across a peer's sessions): in a
+  /// concurrent-initiation (glare) race, blanket-clearing would flip an
+  /// initiator session the peer has not yet received to type-1 and make it
+  /// permanently undecryptable.
+  void _clearPrekeyState(DoubleRatchetSession session) {
+    if (!session.isPreKeySession) return;
+    session.isPreKeySession = false;
+    session.ephemeralPublicKey = null;
+    session.preKeySignedPreKeyId = null;
+    session.preKeyOneTimePreKeyId = null;
   }
 
   /// Decrypt [ciphertext] from [senderId]:[deviceId].
@@ -830,6 +893,12 @@ class SignalProtocolService {
         final result = _trialDecrypt(existing, parsed.encryptedMessage);
         if (result != null) {
           _markMostRecentlyUsed(sessionKey, result.session);
+          // Defensive prekey retire on the specific decrypting session only.
+          // In practice this is a no-op: a session that decrypts an INBOUND
+          // type-2 is a receiver session (isPreKeySession=false); an initiator
+          // prekey session cannot derive the peer's type-2 send chain. Kept
+          // for symmetry with the type-1 primary retire point below.
+          _clearPrekeyState(result.session);
           return result.plaintext;
         }
       }
@@ -839,14 +908,38 @@ class SignalProtocolService {
       // run TOFU pin checks BEFORE consuming our SPK/OPK material.
       // _receiveSession will throw IdentityKeyChangedException (typed) on
       // mismatch or SignalProtocolException if the key is missing.
-      await _receiveSession(
-        sessionKey: sessionKey,
-        remoteIdentityKey: parsed.identityKey,
-        remoteEphemeralKey: parsed.ephemeralKey,
-        signedPreKeyId: parsed.signedPreKeyId,
-        oneTimePreKeyId: parsed.oneTimePreKeyId,
-        remoteIdentityKeyEd25519: senderIdentityKeyEd25519,
-      );
+      //
+      // Persistent-PreKey reset-race guard: now that the initiator sustains
+      // type-2 until the peer replies, a re-sent type-2 can arrive after we
+      // archived/reset the session AND its one-time prekey was already
+      // consumed by the first copy — _receiveSession then throws (OPK gone)
+      // BEFORE we reach the new-session archive fallback below. The same
+      // in-flight message, had it been type-1, would have hit the type-1
+      // archive fallback and recovered. Give type-2 the same recovery: on a
+      // _receiveSession failure that is NOT a TOFU identity mismatch, consult
+      // the archive before rethrowing. An IdentityKeyChangedException MUST
+      // still propagate untouched so it routes to identity-change handling —
+      // never silently archive-fallback past it.
+      try {
+        await _receiveSession(
+          sessionKey: sessionKey,
+          remoteIdentityKey: parsed.identityKey,
+          remoteEphemeralKey: parsed.ephemeralKey,
+          signedPreKeyId: parsed.signedPreKeyId,
+          oneTimePreKeyId: parsed.oneTimePreKeyId,
+          remoteIdentityKeyEd25519: senderIdentityKeyEd25519,
+        );
+      } on IdentityKeyChangedException {
+        rethrow;
+      } catch (_) {
+        final archivedResult =
+            _tryDecryptFromArchive(sessionKey, parsed.encryptedMessage);
+        if (archivedResult != null) {
+          _archiveDecryptDirty = true;
+          return archivedResult;
+        }
+        rethrow;
+      }
 
       // _receiveSession appended the new session to the end via _appendSession.
       final list = _sessions[sessionKey]!;
@@ -900,6 +993,15 @@ class SignalProtocolService {
       final result = _trialDecrypt(list, encrypted);
       if (result != null) {
         _markMostRecentlyUsed(sessionKey, result.session);
+        // Persistent-PreKey PRIMARY retire point: decrypting an INBOUND
+        // normal (type-1) message on this session is proof the peer
+        // bootstrapped it and now sends normal messages — so our initiator
+        // prekey session no longer needs to advertise X3DH material. Retire
+        // the pending-prekey state on THIS session only (never a blanket
+        // per-peer clear: in a glare race that would flip an initiator
+        // session the peer has not yet received to type-1, making it
+        // permanently undecryptable). Idempotent on established sessions.
+        _clearPrekeyState(result.session);
         return result.plaintext;
       }
     }
@@ -1006,7 +1108,19 @@ class SignalProtocolService {
   /// via [setStoreEncryptionKey], the save is skipped entirely. This prevents
   /// identity keys + ratchet material from being written to disk in the
   /// clear when the caller forgets to wire up encryption.
-  Future<void> saveSessionStore(String path) async {
+  ///
+  /// Returns `true` iff the encrypted bytes actually reached disk. Returns
+  /// `false` when no store encryption key is set or when the write fails.
+  /// Callers that upload prekeys MUST persist first and fail closed on
+  /// `false` (persist-before-advertise): advertising a signed / one-time
+  /// prekey whose private key never reached disk makes every later
+  /// receive-first X3DH against it undecryptable after a restart.
+  ///
+  /// The write is atomic: bytes go to a uniquely-named temp file next to
+  /// [path] which is then renamed over [path], so a process kill mid-write
+  /// leaves either the previous store or the new one — never a torn
+  /// ciphertext that would fail to decrypt and lose every session.
+  Future<bool> saveSessionStore(String path) async {
     _archiveDecryptDirty = false;
     final store = <String, dynamic>{};
 
@@ -1092,7 +1206,6 @@ class SignalProtocolService {
     store['messageSendLog'] = _messageSendLog.toJson();
 
     try {
-      final file = File(path);
       final jsonBytes = Uint8List.fromList(utf8.encode(jsonEncode(store)));
       if (_storeEncryptionKey != null) {
         // Zero-Knowledge: encrypt store with the caller-supplied key.
@@ -1103,8 +1216,26 @@ class SignalProtocolService {
           nonce[i] = rng.nextInt(256);
         }
         final encrypted = box.encrypt(jsonBytes, nonce: nonce);
-        await file.writeAsBytes(encrypted.toList());
+        // Atomic write: write to a UNIQUE temp file then rename over the
+        // target. rename() is atomic on the same filesystem. The temp name
+        // MUST be unique per call: saveSessionStore may run concurrently
+        // (e.g. a debounced save firing while a prekey upload's persist is in
+        // flight), and a shared temp path would let two writers interleave on
+        // one file and publish a torn ciphertext anyway. With unique temps
+        // each writer produces a complete, valid ciphertext and the last
+        // rename wins.
+        final suffix =
+            List.generate(8, (_) => rng.nextInt(16).toRadixString(16)).join();
+        final tmp = File('$path.$suffix.tmp');
+        await tmp.writeAsBytes(encrypted.toList(), flush: true);
+        try {
+          await tmp.rename(path);
+        } catch (_) {
+          await tmp.delete().catchError((_) => tmp);
+          rethrow;
+        }
         _storeWasEncrypted = true;
+        return true;
       } else {
         // Plaintext fallback is refused. The previous behaviour wrote plain
         // JSON to disk if `setStoreEncryptionKey` had not yet been called
@@ -1113,9 +1244,11 @@ class SignalProtocolService {
         debugPrint('[SignalProtocolService] saveSessionStore SKIPPED — '
             'no encryption key set. Caller must invoke '
             'setStoreEncryptionKey() before persisting.');
+        return false;
       }
     } catch (e) {
       debugPrint('[SignalProtocolService] Failed to save session store: $e');
+      return false;
     }
   }
 
@@ -1373,6 +1506,72 @@ class SignalProtocolService {
   EncryptedMessage _deserializeNormalMessage(Uint8List data) {
     final json = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
     return EncryptedMessage.fromJson(json);
+  }
+
+  /// Recover the Signal message type (1 = normal, 2 = prekey) from an
+  /// unsealed Double Ratchet ciphertext WITHOUT trusting any
+  /// transport-supplied field, and cross-check the sender's X3DH identity
+  /// against the Sealed Sender certificate.
+  ///
+  /// Call this on [UnsealedMessage.drCiphertext] with
+  /// [UnsealedMessage.senderIdentityKey] and pass the result as
+  /// `messageType` to [decryptMessage].
+  ///
+  /// Why not read messageType off the wire: Sealed Sender deliberately hides
+  /// the inner message type from the transport, so a relay server never
+  /// learns it and cannot be trusted to supply it. A receiver that defaulted
+  /// to type-1 misrouted every first-contact prekey message as a normal
+  /// message: the X3DH responder branch never ran, no session was built, and
+  /// the very first message to a brand-new contact was lost. The DR
+  /// ciphertext is self-describing JSON: a prekey message (X3DH bootstrap)
+  /// carries both `identityKey` and `ephemeralKey` (see
+  /// [_serializeEncryptedMessage]); a normal message never does
+  /// ([EncryptedMessage.toJson] emits only ciphertext / ratchetPublicKey /
+  /// messageNumber / previousChainLength — a disjoint key set). Presence of
+  /// BOTH keys therefore identifies a prekey message with no false
+  /// positives.
+  ///
+  /// Sealed Sender Step 9: for a prekey message the X25519 identity key
+  /// embedded in the X3DH header MUST equal [certIdentityKey] (the identity
+  /// the server-signed sender certificate vouches for), compared in constant
+  /// time. A mismatch means the authenticated sender and the X3DH initiator
+  /// identity disagree — rejected with the same opaque `StateError('Sealed
+  /// message rejected')` every other unseal rejection uses (oracle-safe).
+  /// Normal messages have no X3DH header to cross-check; their session
+  /// lookup is already keyed on the certificate-authenticated sender, so a
+  /// wrong-identity certificate cannot decrypt a victim's session.
+  ///
+  /// Robustness: a non-JSON / structurally-unparseable ciphertext degrades
+  /// to messageType 1 (it then rides the normal trial-decrypt + retry path).
+  /// A structurally-valid prekey header that fails validation — malformed
+  /// hex in `identityKey`, or an identity failing the Step 9 cross-check —
+  /// throws instead: that is a genuine rejection, not a normal message.
+  /// Callers should invoke this inside the same `try` as [decryptMessage] so
+  /// any such throw lands on their normal decrypt-failure path.
+  int resolveSealedMessageType(
+    Uint8List drCiphertext,
+    Uint8List certIdentityKey,
+  ) {
+    final Map<String, dynamic> json;
+    try {
+      json = jsonDecode(utf8.decode(drCiphertext)) as Map<String, dynamic>;
+    } catch (_) {
+      // Malformed / non-JSON: treat as normal so it stays on the existing
+      // session trial-decrypt + retry path instead of being rejected here.
+      return 1;
+    }
+    final idHex = json['identityKey'];
+    final ephHex = json['ephemeralKey'];
+    if (idHex is! String || ephHex is! String) {
+      return 1; // Normal message — no X3DH header present.
+    }
+    // Prekey message: bind the X3DH initiator identity to the certificate.
+    final x3dhIdentity = _hexToBytes(idHex);
+    if (x3dhIdentity.length != certIdentityKey.length ||
+        !_constantTimeBytesEqual(x3dhIdentity, certIdentityKey)) {
+      throw StateError('Sealed message rejected');
+    }
+    return 2;
   }
 
   // ---------------------------------------------------------------------------

@@ -1,16 +1,16 @@
 /// @file        sealed_sender.dart
-/// @description Sealed Sender 서비스. seal() 암호화 / unseal() 복호화, 리플레이 캐시, 패딩 처리
+/// @description Sealed Sender service. seal() encryption / unseal() decryption, replay cache, padding handling
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-04-12
+/// @lastUpdated 2026-11-10 (backport SnowChat c062a09: Step 9 comment — the identity cross-check is performed by SignalProtocolService.resolveSealedMessageType(); no code change; header translated to English)
 ///
 /// @functions
-///  - SealedSenderService: Sealed Sender 암호화/복호화 서비스
-///  - SealedSenderService.seal(): 수신자 IK로 DR 암호문 봉인 (ephemeral DH → HKDF → XSalsa20-Poly1305)
-///  - SealedSenderService.unseal(): 봉인 해제 (리플레이 체크 → DH → HKDF → 복호화 → 인증서 검증)
-///  - UnsealedMessage: 봉인 해제 결과 데이터 클래스
-///  - _ReplayCache: EK_seal 기반 LRU 리플레이 캐시 (10K 엔트리, 24시간 TTL)
+///  - SealedSenderService: Sealed Sender encryption/decryption service
+///  - SealedSenderService.seal(): Seal DR ciphertext with recipient IK (ephemeral DH -> HKDF -> XSalsa20-Poly1305)
+///  - SealedSenderService.unseal(): Unseal (replay check -> DH -> HKDF -> decrypt -> certificate verify)
+///  - UnsealedMessage: Unseal result data class
+///  - _ReplayCache: EK_seal based LRU replay cache (10K entries, 24h TTL)
 
 import 'dart:convert';
 import 'dart:math';
@@ -423,9 +423,14 @@ class SealedSenderService {
       throw StateError('Sealed message rejected');
     }
 
-    // Step 9: Identity key cross-check is done by the caller after DR decrypt,
-    // because the caller has access to the session store. We return the
-    // certificate's identity key so the caller can perform the check.
+    // Step 9: Identity key cross-check is performed by the caller via
+    // SignalProtocolService.resolveSealedMessageType() — for a prekey message
+    // it binds the certificate identity returned here to the X25519 identity
+    // embedded in the X3DH header (before DR decrypt, prekey-only). Normal
+    // messages need no cross-check: their session lookup is already keyed on
+    // this certificate-authenticated senderId, so a wrong-identity certificate
+    // cannot decrypt a victim's session. We return the certificate's identity
+    // key so the caller can perform the check.
 
     // Step 10: Return unsealed message.
     return UnsealedMessage(
