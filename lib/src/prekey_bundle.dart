@@ -3,10 +3,13 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-03-30
+/// @lastUpdated 2026-11-23 (verifySignature() is strict Ed25519 — non-reduced S >= L and
+///              small-order / non-canonical identity keys are refused; English-only comments;
+///              library directive). Earlier 2026-03-30
 ///
 /// @functions
 ///  - PreKeyBundle: PreKey bundle data class (server upload)
+///  - PreKeyBundle.verifySignature(): strict Ed25519 check of the signed prekey signature
 ///  - SignedPreKey: Signed prekey data class (key pair + signature)
 ///  - OneTimePreKey: One-time prekey data class
 ///  - PreKeyGenerator.generateSignedPreKey(): Generate a signed prekey (Ed25519 signature)
@@ -18,6 +21,7 @@ import 'dart:typed_data';
 
 import 'package:pinenacl/ed25519.dart' as ed;
 
+import 'ed25519_strict.dart';
 import 'x25519.dart';
 
 /// A prekey bundle containing all keys needed for X3DH session establishment.
@@ -53,19 +57,16 @@ class PreKeyBundle {
     required this.registrationId,
   });
 
-  /// Verify the signed prekey signature using the identity public key (Ed25519).
-  bool verifySignature(Uint8List identityPublicKeyEd25519) {
-    try {
-      final verifyKey = ed.VerifyKey(identityPublicKeyEd25519);
-      verifyKey.verify(
-        signature: ed.Signature(signedPreKeySignature),
-        message: signedPreKey,
+  /// Verify the signed prekey signature using the identity public key
+  /// (Ed25519). Strict ([verifyEd25519Strict]): a malleated signature
+  /// (S >= L) or a small-order / non-canonical identity key is refused,
+  /// although plain TweetNaCl would accept it. Never throws.
+  bool verifySignature(Uint8List identityPublicKeyEd25519) =>
+      verifyEd25519Strict(
+        identityPublicKeyEd25519,
+        signedPreKey,
+        signedPreKeySignature,
       );
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
 }
 
 /// A signed prekey with both private and public keys.

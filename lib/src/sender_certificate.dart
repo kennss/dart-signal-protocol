@@ -3,7 +3,9 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-20
+/// @lastUpdated 2026-11-23 (verify() is strict Ed25519 — a malleated server signature or a
+///              small-order server key is refused; English-only comments; library directive).
+///              Earlier 2026-04-20
 ///
 /// @functions
 ///  - SenderCertificate: Sender certificate data class (fixed 177 bytes)
@@ -16,7 +18,7 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:pinenacl/ed25519.dart' as ed;
+import 'ed25519_strict.dart';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -218,7 +220,8 @@ class SenderCertificate {
   /// Checks in order (all must pass):
   /// 1. Version == 0x01
   /// 2. Not expired
-  /// 3. Ed25519 signature over bytes [0..112] is valid
+  /// 3. Ed25519 signature over bytes [0..112] is valid (strict: S < L, the
+  ///    key is canonical and not of small order)
   ///
   /// Throws [StateError] on any verification failure with a descriptive message.
   void verify(Uint8List serverVerifyKey) {
@@ -238,27 +241,16 @@ class SenderCertificate {
       );
     }
 
-    // 3. Server signature verification
-    // Uses the same VerifyKey.verify() pattern as prekey_bundle.dart and
-    // sender_key.dart. Throws on invalid signature.
+    // 3. Server signature verification — strict Ed25519 (verifyEd25519Strict):
+    // a malleated signature (S >= L) or a small-order server key is refused.
     final certBytes = toBytes();
     final signedPortion = Uint8List.sublistView(
       certBytes,
       0,
       _signedPortionLength,
     );
-
-    try {
-      final verifyKey = ed.VerifyKey(serverVerifyKey);
-      verifyKey.verify(
-        signature: ed.Signature(serverSignature),
-        message: signedPortion,
-      );
-    } catch (e) {
-      if (e is StateError) rethrow;
-      throw StateError(
-        'SenderCertificate server signature verification failed: $e',
-      );
+    if (!verifyEd25519Strict(serverVerifyKey, signedPortion, serverSignature)) {
+      throw StateError('SenderCertificate server signature verification failed');
     }
   }
 

@@ -5,12 +5,12 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-07
-/// @lastUpdated 2026-11-10 (Identity Binding v1 exports: binding, admission, verified identity store, Safety Number)
+/// @lastUpdated 2026-11-23 (ed25519_strict export). Earlier 2026-11-10 (Identity Binding v1 exports: binding, admission, verified identity store, Safety Number)
 
 library dart_signal_protocol;
 
 // Exports are kept in alphabetical order (directives_ordering). Areas:
-//  - primitives:      hkdf, x25519
+//  - primitives:      ed25519_strict, hkdf, x25519
 //  - 1:1 messaging:   double_ratchet, prekey_bundle, x3dh
 //  - group messaging: message_send_log, sender_key, sender_key_tracker
 //  - files:           file_encryptor
@@ -22,6 +22,7 @@ library dart_signal_protocol;
 //  - orchestrator:    signal_protocol_service
 //  - logging:         logger (setSignalProtocolLogger only)
 export 'src/double_ratchet.dart';
+export 'src/ed25519_strict.dart';
 export 'src/file_encryptor.dart';
 export 'src/hkdf.dart';
 export 'src/identity_admission.dart';
