@@ -3,7 +3,8 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (Identity Binding v1: sessions persist remoteIdentityKey — the peer X25519 identity key used in X3DH — so sessions can be checked against a peer's account-bound identity; header translated to English)
+/// @lastUpdated 2026-11-23 (remoteIdentityKey comment: a session without it is purged — no
+///              inference; English-only comments; library directive). Earlier 2026-11-10 (Identity Binding v1: sessions persist remoteIdentityKey — the peer X25519 identity key used in X3DH — so sessions can be checked against a peer's account-bound identity; header translated to English)
 ///
 /// @functions
 ///  - EncryptedMessage: encrypted message data class (ciphertext + ratchet key + message number)
@@ -411,9 +412,10 @@ class DoubleRatchetSession {
   int? preKeyOneTimePreKeyId;
 
   /// The remote X25519 identity key this session was established with
-  /// (X3DH). Null only for sessions persisted before 0.3.0. Used by
-  /// SignalProtocolService to refuse / purge sessions that do not match a
-  /// peer's account-bound identity key (Identity Binding v1).
+  /// (X3DH). Set by every session SignalProtocolService makes or restores
+  /// since 0.3.0; a session without it (persisted before 0.3.0) does not
+  /// match a peer's account-bound identity key and is purged, never labelled
+  /// by inference (Identity Binding v1).
   Uint8List? remoteIdentityKey;
 
   Map<String, dynamic> toJson() => {

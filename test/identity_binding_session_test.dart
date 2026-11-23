@@ -2,23 +2,26 @@
 /// @description Identity Binding v1 end-to-end over the REAL Signal layer
 ///              (X3DH + Double Ratchet, pinenacl): send-side admission inside
 ///              createSession (tamper / substituted bundle / downgrade /
-///              epoch regression / same-key re-sign / reinstall notice /
-///              legacy->bound interception warning), the Signal-style legacy
-///              policy (unverified -> continue + notice, verified -> block
-///              until re-verify, notice emitted once), receive-side
-///              verification of the binding embedded in type-2 messages
-///              (offline, header-IK swap rejected before any OPK is consumed,
-///              device mismatch, malformed binding, directory fallback,
-///              downgrade, server-bound IK mismatch, transient lookup
-///              failure), device selection + non-consuming directory
-///              admission, promotion-notice rules, bound-session purge
-///              (active + archived) and remoteIdentityKey persistence,
-///              backward compatibility without an identity store, and Safety
-///              Number v2 symmetry + cross-implementation golden.
+///              epoch regression / same-key re-sign / reinstall notice), the
+///              refusal of a peer without a binding (bindings are mandatory:
+///              an unbound bundle or a binding-less sender is refused and
+///              nothing is recorded), transient store failures (never
+///              fail-open), receive-side verification of the binding embedded
+///              in type-2 messages (offline, header-IK swap rejected before
+///              any OPK is consumed, device mismatch, malformed binding,
+///              directory fallback, downgrade, server-bound IK mismatch,
+///              transient lookup failure), device selection + non-consuming
+///              directory admission, key-change notice rules, bound-session
+///              purge (active + archived, and sessions without a stored remote
+///              IK) and remoteIdentityKey persistence, archiveSessionsOf, and
+///              Safety Number v2 symmetry + cross-implementation golden.
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
-/// @lastUpdated 2026-11-10
+/// @lastUpdated 2026-11-23 (backport SnowChat 3df0cc5 / 0aa549b: bindings always mandatory —
+///              the legacy TOFU cases became refusals; promotionNotice -> keyChangeNotice; no
+///              store-less backward-compatibility group; sessions without a remote IK are purged;
+///              archiveSessionsOf). Earlier 2026-11-10
 ///
 /// @functions
 ///  - main(): session-level identity binding tests
@@ -29,6 +32,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dart_signal_protocol/dart_signal_protocol.dart';
+import 'package:pinenacl/x25519.dart' as nacl_api;
 import 'package:test/test.dart';
 
 import 'identity_test_support.dart';
@@ -51,6 +55,25 @@ List<IdentityStoreEvent> _collect(VerifiedIdentityStore store) {
 }
 
 Future<void> _flush() => Future<void>.delayed(Duration.zero);
+
+/// An in-memory store whose reads throw while [fail] is set (storage
+/// unavailable, e.g. a locked keychain).
+class _FailingStore extends InMemoryVerifiedIdentityStore {
+  bool fail = false;
+
+  @override
+  Future<VerifiedIdentityRecord?> readRecord(String peerId,
+      {bool fresh = false}) {
+    if (fail) throw StateError('storage unavailable');
+    return super.readRecord(peerId, fresh: fresh);
+  }
+
+  @override
+  Future<int?> readLatch(String peerId, {bool fresh = false}) {
+    if (fail) throw StateError('storage unavailable');
+    return super.readLatch(peerId, fresh: fresh);
+  }
+}
 
 void main() {
   group('send side — createSession admission', () {
@@ -163,7 +186,7 @@ void main() {
 
     test('invite-link pin latches a first contact against downgrade',
         () async {
-      expect(await alice.store.pinFromInviteLink(bob.peerId, bob.accountPub),
+      expect(await alice.store.pinAccountKey(bob.peerId, bob.accountPub),
           isTrue);
       await expectLater(
         alice.signal.createSession(
@@ -283,18 +306,38 @@ void main() {
       );
     });
 
-    test('legacy -> bound promotion with different keys -> interception '
-        'warning', () async {
-      final events = _collect(alice.store);
+    test('an unbound attacker bundle under a never-bound peer id is refused '
+        'and leaves nothing; the real bound keys are then admitted', () async {
       final mitm = await TestParty.create(seedByte: 9, deviceId: _devB);
-      // Transition period: the server hands out an unbound attacker bundle
-      // under Bob's id (accepted as legacy TOFU)…
+      // The server hands out an unbound attacker bundle under Bob's id.
+      await expectLater(
+        alice.signal.createSession(
+          recipientId: bob.peerId,
+          deviceId: _devB,
+          preKeyBundle: mitm.bundle(),
+        ),
+        throwsA(_bindingRejected(IdentityBindingFailure.bindingRequired)),
+      );
+      expect(await alice.signal.hasSession(bob.peerId, _devB), isFalse);
+      expect(await alice.store.get(bob.peerId), isNull);
+      expect(await alice.store.latchedEpoch(bob.peerId), isNull);
+      // Bob's real, bound keys.
       await alice.signal.createSession(
         recipientId: bob.peerId,
         deviceId: _devB,
-        preKeyBundle: mitm.bundle(),
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
       );
-      // …then Bob upgrades and presents his real, bound keys.
+      expect((await alice.store.get(bob.peerId))!.identityKey, bob.identityKey);
+    });
+
+    test('a reinstall of a bound peer gives the device notice; the first '
+        'binding after an account-key pin gives none', () async {
+      final bobNew = await TestParty.create(seedByte: 2, deviceId: _devB2);
+      final events = _collect(alice.store);
+      expect(await alice.store.pinAccountKey(bob.peerId, bob.accountPub),
+          isTrue);
       await alice.signal.createSession(
         recipientId: bob.peerId,
         deviceId: _devB,
@@ -303,24 +346,8 @@ void main() {
             accountPublicKey: bob.accountPub),
       );
       await _flush();
-      expect(events.map((e) => e.kind),
-          contains(IdentityEventKind.interceptionSuspected));
-      expect((await alice.store.get(bob.peerId))!.identityKey, bob.identityKey);
-    });
+      expect(events, isEmpty);
 
-    test('honest reinstall over a legacy-sourced record -> device notice, '
-        'NOT interception', () async {
-      final bobNew = await TestParty.create(seedByte: 2, deviceId: _devB2);
-      // Pre-binding state: imported pin + seeded IK with its device.
-      await alice.store.put(VerifiedIdentityRecord(
-        peerId: bob.peerId,
-        deviceId: _devB,
-        identityKey: bob.identityKey,
-        ed25519: bob.ed25519,
-        edLegacySourced: true,
-        updatedAt: 1,
-      ));
-      final events = _collect(alice.store);
       await alice.signal.createSession(
         recipientId: bobNew.peerId,
         deviceId: _devB2,
@@ -331,91 +358,116 @@ void main() {
       await _flush();
       expect(events.map((e) => e.kind), [IdentityEventKind.deviceKeysChanged]);
     });
+
+    test('a 0.3.x record with unproven (TOFU) keys is read as an account-key '
+        'pin only: its keys are dropped and the first binding is no change',
+        () async {
+      // What a 0.3.x store wrote for a legacy peer: keys, no binding.
+      alice.store.putRawRecordForTesting(
+        bob.peerId,
+        jsonEncode({
+          'schema': 1,
+          'snowId': bob.peerId,
+          'accountPub': hexLower(bob.accountPub),
+          'deviceId': _devB2,
+          'ik': base64Encode(Uint8List(32)..[0] = 9),
+          'ed': base64Encode(Uint8List(32)..[0] = 8),
+          'edLegacy': true,
+          'pendingIk': base64Encode(Uint8List(32)..[0] = 7),
+          'bound': false,
+          'updatedAt': 1,
+        }),
+      );
+      final rec = await alice.store.get(bob.peerId);
+      expect(rec!.accountPublicKey, bob.accountPub);
+      expect(rec.identityKey, isNull);
+      expect(rec.ed25519, isNull);
+      expect(rec.deviceId, isNull);
+      final events = _collect(alice.store);
+      await alice.signal.createSession(
+        recipientId: bob.peerId,
+        deviceId: _devB,
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
+      );
+      await _flush();
+      expect(events, isEmpty);
+      expect((await alice.store.get(bob.peerId))!.bound, isTrue);
+    });
   });
 
-  group('legacy policy (Signal style)', () {
+  group('without a binding (bindings are mandatory)', () {
     late TestParty alice;
 
     setUp(() async {
       alice = await TestParty.create(seedByte: 1, deviceId: _devA);
     });
 
-    test('unverified key change -> updated, notice, session continues',
-        () async {
+    test('a peer that presents no binding is refused at first contact and '
+        'again later: bindingRequired, no session, nothing recorded', () async {
       final events = _collect(alice.store);
       final old = await TestParty.create(seedByte: 4, deviceId: _devB);
       final reinstalled = await TestParty.create(seedByte: 4, deviceId: _devB2);
-      await alice.signal.createSession(
-          recipientId: old.peerId, deviceId: _devB, preKeyBundle: old.bundle());
-      await alice.signal.createSession(
-          recipientId: old.peerId,
-          deviceId: _devB2,
-          preKeyBundle: reinstalled.bundle());
-      await _flush();
-      expect(events.single.kind, IdentityEventKind.legacyKeyChanged);
-      expect((await alice.store.get(old.peerId))!.identityKey,
-          reinstalled.identityKey);
-      expect(await alice.signal.hasSession(old.peerId, _devB2), isTrue);
-    });
-
-    test('verified key change -> blocked (notice once) until re-verify',
-        () async {
-      alice.store.verifiedLookup = (_) async => true;
-      final events = _collect(alice.store);
-      final old = await TestParty.create(seedByte: 5, deviceId: _devB);
-      final reinstalled = await TestParty.create(seedByte: 5, deviceId: _devB2);
-      await alice.signal.createSession(
-          recipientId: old.peerId, deviceId: _devB, preKeyBundle: old.bundle());
-
-      for (var i = 0; i < 2; i++) {
+      for (final (party, device) in [(old, _devB), (reinstalled, _devB2)]) {
         await expectLater(
           alice.signal.createSession(
               recipientId: old.peerId,
-              deviceId: _devB2,
-              preKeyBundle: reinstalled.bundle(opkIndex: i)),
-          throwsA(isA<IdentityKeyChangedException>()),
+              deviceId: device,
+              preKeyBundle: party.bundle()),
+          throwsA(_bindingRejected(IdentityBindingFailure.bindingRequired)),
         );
+        expect(await alice.signal.hasSession(old.peerId, device), isFalse);
       }
+      expect(await alice.store.get(old.peerId), isNull);
+      expect(await alice.store.latchedEpoch(old.peerId), isNull);
       await _flush();
-      expect(events.single.kind, IdentityEventKind.legacyKeyChangeBlocked,
-          reason: 'notice only on the transition into the blocked state');
-      expect((await alice.store.get(old.peerId))!.hasPendingChange, isTrue);
-
-      // Still blocked even though the verification flag now reads false.
-      alice.store.verifiedLookup = (_) async => false;
-      await expectLater(
-        alice.signal.createSession(
-            recipientId: old.peerId,
-            deviceId: _devB2,
-            preKeyBundle: reinstalled.bundle(opkIndex: 1)),
-        throwsA(isA<IdentityKeyChangedException>()),
-      );
-
-      // User re-verifies -> pending keys adopted.
-      expect(await alice.store.acceptPendingChange(old.peerId), isTrue);
-      await alice.signal.createSession(
-          recipientId: old.peerId,
-          deviceId: _devB2,
-          preKeyBundle: reinstalled.bundle(opkIndex: 2));
-      expect(await alice.signal.hasSession(old.peerId, _devB2), isTrue);
+      expect(events.map((e) => e.kind),
+          everyElement(IdentityEventKind.bindingRejected));
+      expect(events.map((e) => e.reason),
+          everyElement(IdentityBindingFailure.bindingRequired));
     });
 
-    test('verification lookup failure is transient, not fail-open', () async {
-      alice.store.verifiedLookup = (_) async => throw StateError('db down');
-      final old = await TestParty.create(seedByte: 6, deviceId: _devB);
-      final reinstalled = await TestParty.create(seedByte: 6, deviceId: _devB2);
-      await alice.signal.createSession(
-          recipientId: old.peerId, deviceId: _devB, preKeyBundle: old.bundle());
+    test('a server-supplied account key does not stand in for a binding',
+        () async {
+      final bob = await TestParty.create(seedByte: 5, deviceId: _devB);
       await expectLater(
         alice.signal.createSession(
-            recipientId: old.peerId,
-            deviceId: _devB2,
-            preKeyBundle: reinstalled.bundle()),
-        throwsA(isA<SignalProtocolException>()
-            .having((e) => e is IdentityBindingInvalidException, 'hard', isFalse)),
+            recipientId: bob.peerId,
+            deviceId: _devB,
+            preKeyBundle: bob.bundle(accountPublicKey: bob.accountPub)),
+        throwsA(_bindingRejected(IdentityBindingFailure.bindingRequired)),
       );
-      expect((await alice.store.get(old.peerId))!.identityKey, old.identityKey,
-          reason: 'keys must not be silently replaced');
+      expect(await alice.store.get(bob.peerId), isNull);
+    });
+
+    test('an identity store failure is transient, never fail-open', () async {
+      final store = _FailingStore();
+      final failing = SignalProtocolService(identityStore: store);
+      await failing.generateIdentityKeyPair();
+      await failing.generateSignedPreKey(1);
+      final bob = await TestParty.create(seedByte: 6, deviceId: _devB);
+      store.fail = true;
+      await expectLater(
+        failing.createSession(
+            recipientId: bob.peerId,
+            deviceId: _devB,
+            preKeyBundle: bob.bundle(
+                binding: bob.bindingFor(epoch: 1000),
+                accountPublicKey: bob.accountPub)),
+        throwsA(isA<SignalProtocolException>().having(
+            (e) => e is IdentityBindingInvalidException, 'hard', isFalse)),
+      );
+      expect(await failing.hasSession(bob.peerId, _devB), isFalse);
+      store.fail = false;
+      await failing.createSession(
+          recipientId: bob.peerId,
+          deviceId: _devB,
+          preKeyBundle: bob.bundle(
+              binding: bob.bindingFor(epoch: 1000),
+              accountPublicKey: bob.accountPub,
+              opkIndex: 1));
+      expect(await failing.hasSession(bob.peerId, _devB), isTrue);
     });
   });
 
@@ -539,41 +591,85 @@ void main() {
       );
     });
 
-    test('binding-less sender (old client) -> directory fallback, legacy '
-        'accept', () async {
-      final enc = await aliceFirstMessage('legacy hi', embed: false);
+    test('binding-less sender whose directory holds no binding either -> '
+        'refused, nothing recorded', () async {
+      final enc = await aliceFirstMessage('unbound hi', embed: false);
       final json = jsonDecode(utf8.decode(enc['ciphertext'] as Uint8List));
       expect((json as Map)['identityBinding'], isNull);
       var lookups = 0;
+      await expectLater(
+        bob.signal.decryptMessage(
+          senderId: alice.peerId,
+          deviceId: _devA,
+          ciphertext: enc['ciphertext'] as Uint8List,
+          messageType: 2,
+          envelopeDeviceId: _devA,
+          identityDirectoryLookup: () async {
+            lookups++;
+            return RemoteIdentityDirectory(
+              accountPublicKey: alice.accountPub,
+              devices: [
+                RemoteDeviceIdentity(
+                  deviceId: _devA,
+                  identityKey: alice.identityKey,
+                  ed25519: alice.ed25519,
+                  binding: null,
+                  bindingUnparseable: false,
+                  index: 0,
+                ),
+              ],
+            );
+          },
+        ),
+        throwsA(_bindingRejected(IdentityBindingFailure.bindingRequired)),
+      );
+      expect(lookups, 1);
+      expect(await bob.store.get(alice.peerId), isNull);
+      expect(await bob.signal.hasSession(alice.peerId, _devA), isFalse);
+      // The refusal came before any prekey was used.
+      expect(bob.signal.signedPreKeyPublicKey(1), isNotNull);
+    });
+
+    test('binding-less sender with no directory lookup -> refused', () async {
+      final enc = await aliceFirstMessage('unbound hi', embed: false);
+      await expectLater(
+        bob.signal.decryptMessage(
+          senderId: alice.peerId,
+          deviceId: _devA,
+          ciphertext: enc['ciphertext'] as Uint8List,
+          messageType: 2,
+          envelopeDeviceId: _devA,
+        ),
+        throwsA(_bindingRejected(IdentityBindingFailure.bindingRequired)),
+      );
+    });
+
+    test('binding-less sender whose directory holds a binding for the header '
+        'IK -> admitted through it', () async {
+      final enc = await aliceFirstMessage('via directory', embed: false);
       final pt = await bob.signal.decryptMessage(
         senderId: alice.peerId,
         deviceId: _devA,
         ciphertext: enc['ciphertext'] as Uint8List,
         messageType: 2,
         envelopeDeviceId: _devA,
-        identityDirectoryLookup: () async {
-          lookups++;
-          return RemoteIdentityDirectory(
-            accountPublicKey: alice.accountPub,
-            devices: [
-              RemoteDeviceIdentity(
-                deviceId: _devA,
-                identityKey: alice.identityKey,
-                ed25519: alice.ed25519,
-                binding: null,
-                bindingUnparseable: false,
-                index: 0,
-              ),
-            ],
-          );
-        },
+        identityDirectoryLookup: () async => RemoteIdentityDirectory(
+          accountPublicKey: alice.accountPub,
+          devices: [
+            RemoteDeviceIdentity(
+              deviceId: _devA,
+              identityKey: alice.identityKey,
+              ed25519: alice.ed25519,
+              binding: alice.bindingFor(epoch: 4000),
+              bindingUnparseable: false,
+              index: 0,
+            ),
+          ],
+        ),
       );
-      expect(utf8.decode(pt), 'legacy hi');
-      expect(lookups, 1);
-      final rec = await bob.store.get(alice.peerId);
-      expect(rec!.bound, isFalse);
-      expect(rec.identityKey, alice.identityKey);
-      expect(rec.accountPublicKey, alice.accountPub);
+      expect(utf8.decode(pt), 'via directory');
+      expect((await bob.store.get(alice.peerId))!.bound, isTrue);
+      expect(await bob.store.latchedEpoch(alice.peerId), 4000);
     });
 
     test('binding-less message from a latched sender -> downgrade rejected',
@@ -638,21 +734,6 @@ void main() {
       );
     });
 
-    test('senderIdentityKeyEd25519 with an identity store -> ArgumentError',
-        () async {
-      final enc = await aliceFirstMessage('hi');
-      await expectLater(
-        bob.signal.decryptMessage(
-          senderId: alice.peerId,
-          deviceId: _devA,
-          ciphertext: enc['ciphertext'] as Uint8List,
-          messageType: 2,
-          senderIdentityKeyEd25519: alice.ed25519,
-        ),
-        throwsArgumentError,
-      );
-    });
-
     test('full round trip: bound both ways, replies are type-1', () async {
       final enc = await aliceFirstMessage('ping');
       expect(
@@ -682,9 +763,15 @@ void main() {
     test('archived sessions with a superseded IK are purged too', () async {
       final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
       final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
-      // Legacy (unbound) session Alice -> Bob, bootstrapped both ways.
+      alice.signal.setLocalIdentityBinding(alice.localBinding(epoch: 1000));
+      // Bound session Alice -> Bob, bootstrapped both ways.
       await alice.signal.createSession(
-          recipientId: bob.peerId, deviceId: _devB, preKeyBundle: bob.bundle());
+        recipientId: bob.peerId,
+        deviceId: _devB,
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
+      );
       final first = await alice.signal.encryptMessage(
           recipientId: bob.peerId, deviceId: _devB, plaintext: _utf8('hi'));
       await bob.signal.decryptMessage(
@@ -725,8 +812,8 @@ void main() {
       await expectLater(aliceReads(heldB), throwsA(isA<SignalProtocolException>()));
     });
 
-    test('remoteIdentityKey survives save/load; IK seeding runs on load',
-        () async {
+    test('remoteIdentityKey survives save/load; nothing is seeded into the '
+        'identity store on load', () async {
       final dir = await Directory.systemTemp.createTemp('dsp_b2');
       addTearDown(() => dir.delete(recursive: true));
       final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
@@ -734,7 +821,12 @@ void main() {
       final key = Uint8List.fromList(List.filled(32, 42));
       alice.signal.setStoreEncryptionKey(key);
       await alice.signal.createSession(
-          recipientId: bob.peerId, deviceId: _devB, preKeyBundle: bob.bundle());
+        recipientId: bob.peerId,
+        deviceId: _devB,
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
+      );
       final path = '${dir.path}/store.bin';
       expect(await alice.signal.saveSessionStore(path), isTrue);
 
@@ -743,10 +835,85 @@ void main() {
         ..setStoreEncryptionKey(key);
       await reloaded.loadSessionStore(path);
       expect(reloaded.getRemoteIdentityKey(bob.peerId), bob.identityKey);
-      final seeded = await fresh.get(bob.peerId);
-      expect(seeded!.identityKey, bob.identityKey);
-      expect(seeded.deviceId, _devB);
-      expect(seeded.bound, isFalse);
+      expect(await fresh.get(bob.peerId), isNull);
+
+      // Same store as before: the restored session matches the bound IK.
+      final again = SignalProtocolService(identityStore: alice.store)
+        ..setStoreEncryptionKey(key);
+      await again.loadSessionStore(path);
+      expect(await again.hasSession(bob.peerId, _devB), isTrue);
+    });
+
+    test('a session persisted without a remote IK (pre-0.3.0) is purged for '
+        'a bound peer, never labelled by inference', () async {
+      final dir = await Directory.systemTemp.createTemp('dsp_noik');
+      addTearDown(() => dir.delete(recursive: true));
+      final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
+      final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
+      final key = Uint8List.fromList(List.filled(32, 43));
+      alice.signal.setStoreEncryptionKey(key);
+      await alice.signal.createSession(
+        recipientId: bob.peerId,
+        deviceId: _devB,
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
+      );
+      final path = '${dir.path}/store.bin';
+      expect(await alice.signal.saveSessionStore(path), isTrue);
+
+      // Rewrite the store as a pre-0.3.0 build would have left it: the
+      // session carries no remoteIdentityKey (the per-peer IK is still the
+      // bound one — 0.3.0 used it to label such a session and keep it).
+      final file = File(path);
+      final raw = await file.readAsBytes();
+      final box = nacl_api.SecretBox(key);
+      final store = jsonDecode(utf8.decode(box.decrypt(nacl_api.EncryptedMessage(
+          nonce: raw.sublist(0, 24), cipherText: raw.sublist(24))))) as Map;
+      final sessions = store['sessions'] as Map;
+      for (final list in sessions.values) {
+        for (final sess in list as List) {
+          (sess as Map).remove('remoteIdentityKey');
+        }
+      }
+      expect((store['remoteIdentityKeys'] as Map)[bob.peerId],
+          hexLower(bob.identityKey));
+      final nonce = Uint8List.fromList(List.filled(24, 5));
+      await file.writeAsBytes(box
+          .encrypt(Uint8List.fromList(utf8.encode(jsonEncode(store))),
+              nonce: nonce)
+          .toList());
+
+      final reloaded = SignalProtocolService(identityStore: alice.store)
+        ..setStoreEncryptionKey(key);
+      await reloaded.loadSessionStore(path);
+      expect(await reloaded.hasSession(bob.peerId, _devB), isFalse);
+      expect(reloaded.archiveDecryptDirty, isTrue);
+    });
+
+    test('archiveSessionsOf archives the sessions of one peer only',
+        () async {
+      final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
+      final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
+      final carol = await TestParty.create(seedByte: 3, deviceId: _devB);
+      await alice.signal.createSession(
+        recipientId: bob.peerId,
+        deviceId: _devB,
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
+      );
+      await alice.signal.createSession(
+        recipientId: carol.peerId,
+        deviceId: _devB,
+        preKeyBundle: carol.bundle(
+            binding: carol.bindingFor(epoch: 1000),
+            accountPublicKey: carol.accountPub),
+      );
+      expect(await alice.signal.archiveSessionsOf(bob.peerId), 1);
+      expect(await alice.signal.hasSession(bob.peerId, _devB), isFalse);
+      expect(await alice.signal.hasSession(carol.peerId, _devB), isTrue);
+      expect(await alice.signal.archiveSessionsOf(bob.peerId), 0);
     });
   });
 
@@ -793,16 +960,18 @@ void main() {
         ),
         throwsA(isA<IdentityBindingInvalidException>()),
       );
-      final legacy = admission.selectDevice(
+      // Nobody bound: the first device is returned — and refused by the
+      // admission (bindingRequired), see admitDirectory below.
+      final unbound = admission.selectDevice(
         peerId: bob.peerId,
         accountPublicKey: bob.accountPub,
         devices: [dev(_devB, null, 0), dev(_devB2, null, 1)],
       );
-      expect(legacy!.deviceId, _devB);
+      expect(unbound!.deviceId, _devB);
     });
 
-    test('admitDirectory: forged binding rejected; verified legacy change '
-        'blocked — both before any bundle would be consumed', () async {
+    test('admitDirectory: forged binding rejected; unbound device refused — '
+        'both before any bundle would be consumed', () async {
       final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
       final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
       final admission = IdentityAdmission(alice.store);
@@ -826,123 +995,57 @@ void main() {
           throwsA(isA<IdentityBindingInvalidException>()));
       final ok = await admission.admitDirectory(
           peerId: bob.peerId, directory: dir(bob, good));
-      expect(ok!.admitted.bound, isTrue);
+      expect(ok!.admitted.identityKey, bob.identityKey);
+      expect(ok.admitted.ed25519, bob.ed25519);
       expect(ok.device.deviceId, _devB);
+      expect((await alice.store.get(bob.peerId))!.bound, isTrue);
 
-      final re = await TestParty.create(seedByte: 5, deviceId: _devB2);
-      alice.store.verifiedLookup = (_) async => true;
-      await alice.store.put(VerifiedIdentityRecord(
-        peerId: re.peerId,
-        deviceId: _devB,
-        identityKey: Uint8List.fromList(List.filled(32, 7)),
-        updatedAt: 1,
-      ));
+      final unbound = await TestParty.create(seedByte: 5, deviceId: _devB2);
       await expectLater(
-          admission.admitDirectory(peerId: re.peerId, directory: dir(re, null)),
-          throwsA(isA<IdentityKeyChangedException>()));
+          admission.admitDirectory(
+              peerId: unbound.peerId, directory: dir(unbound, null)),
+          throwsA(_bindingRejected(IdentityBindingFailure.bindingRequired)));
+      expect(await alice.store.get(unbound.peerId), isNull);
+      // A latched peer without a binding is a downgrade.
+      await expectLater(
+          admission.admitDirectory(peerId: bob.peerId, directory: dir(bob, null)),
+          throwsA(_bindingRejected(IdentityBindingFailure.downgrade)));
     });
 
-    test('promotionNotice rules', () {
+    test('keyChangeNotice: only a bound record whose device or keys differ',
+        () {
       final ik1 = Uint8List.fromList(List.filled(32, 1));
       final ik2 = Uint8List.fromList(List.filled(32, 2));
       final ed1 = Uint8List.fromList(List.filled(32, 5));
       final ed2 = Uint8List.fromList(List.filled(32, 6));
-      VerifiedIdentityRecord rec({
-        String? dev,
-        Uint8List? ik,
-        bool legacyEd = false,
-      }) =>
-          VerifiedIdentityRecord(
-            peerId: 'snow0123456789abcdef0123456789abcdef',
-            deviceId: dev,
-            identityKey: ik,
-            ed25519: ed1,
-            edLegacySourced: legacyEd,
-            updatedAt: 1,
-          );
-      // Legacy-sourced Ed differs, IK same -> nothing.
-      expect(
-          IdentityAdmission.promotionNotice(
-              existing: rec(dev: _devB, ik: ik1, legacyEd: true),
-              deviceId: _devB,
-              identityKey: ik1,
-              ed25519: ed2),
-          isNull);
-      // Same device, different IK -> interception.
-      expect(
-          IdentityAdmission.promotionNotice(
-              existing: rec(dev: _devB, ik: ik1),
-              deviceId: _devB,
-              identityKey: ik2,
-              ed25519: ed1),
-          IdentityEventKind.interceptionSuspected);
-      // Unknown legacy device, different IK -> interception.
-      expect(
-          IdentityAdmission.promotionNotice(
-              existing: rec(ik: ik1),
-              deviceId: _devB,
-              identityKey: ik2,
-              ed25519: ed1),
-          IdentityEventKind.interceptionSuspected);
-      // Different device -> reinstall evidence.
-      expect(
-          IdentityAdmission.promotionNotice(
-              existing: rec(dev: _devB, ik: ik1),
-              deviceId: _devB2,
-              identityKey: ik2,
-              ed25519: ed1),
-          IdentityEventKind.deviceKeysChanged);
-    });
-  });
-
-  group('backward compatibility without an identity store', () {
-    test('no store: bindings ignored, legacy fail-closed Ed25519 rule kept',
-        () async {
-      final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
-      final plainBob = SignalProtocolService();
-      await plainBob.generateIdentityKeyPair();
-      await plainBob.generateSignedPreKey(1);
-      final bobBundle = await plainBob.getPreKeyBundle();
-      alice.signal.setLocalIdentityBinding(alice.localBinding(epoch: 1));
-      // Alice (store) -> plain Bob: unbound legacy admission on Alice's side.
-      await alice.signal.createSession(
-          recipientId: 'snowfedcba9876543210fedcba9876543210',
-          deviceId: _devB,
-          preKeyBundle: bobBundle);
-      final enc = await alice.signal.encryptMessage(
-          recipientId: 'snowfedcba9876543210fedcba9876543210',
-          deviceId: _devB,
-          plaintext: _utf8('compat'));
-      // Plain Bob still requires the sender Ed25519 for a new session…
-      await expectLater(
-        plainBob.decryptMessage(
-          senderId: alice.peerId,
-          deviceId: _devA,
-          ciphertext: enc['ciphertext'] as Uint8List,
-          messageType: 2,
-        ),
-        throwsA(isA<SignalProtocolException>()),
+      const peer = 'snow0123456789abcdef0123456789abcdef';
+      final bound = VerifiedIdentityRecord(
+        peerId: peer,
+        accountPublicKey: Uint8List.fromList(List.filled(32, 7)),
+        deviceId: _devB,
+        epoch: 1,
+        identityKey: ik1,
+        ed25519: ed1,
+        bindingSignature: Uint8List(64),
+        bound: true,
+        updatedAt: 1,
       );
-      // …and decrypts with it, ignoring the embedded binding.
-      final pt = await plainBob.decryptMessage(
-        senderId: alice.peerId,
-        deviceId: _devA,
-        ciphertext: enc['ciphertext'] as Uint8List,
-        messageType: 2,
-        senderIdentityKeyEd25519: alice.ed25519,
+      bool notice(VerifiedIdentityRecord r, String dev, Uint8List ik,
+              Uint8List ed) =>
+          IdentityAdmission.keyChangeNotice(
+              existing: r, deviceId: dev, identityKey: ik, ed25519: ed);
+      expect(notice(bound, _devB, ik1, ed1), isFalse, reason: 'same keys');
+      expect(notice(bound, _devB2, ik1, ed1), isTrue, reason: 'other device');
+      expect(notice(bound, _devB, ik2, ed1), isTrue, reason: 'other IK');
+      expect(notice(bound, _devB, ik1, ed2), isTrue, reason: 'other Ed');
+      // A record that only pins the account key holds no keys: first keys
+      // are no change.
+      final pinned = VerifiedIdentityRecord(
+        peerId: peer,
+        accountPublicKey: Uint8List.fromList(List.filled(32, 7)),
+        updatedAt: 1,
       );
-      expect(utf8.decode(pt), 'compat');
-    });
-
-    test('both identity stores -> ArgumentError', () {
-      expect(
-        () => SignalProtocolService(
-          identityStore: InMemoryVerifiedIdentityStore(),
-          // ignore: deprecated_member_use_from_same_package
-          identityPinStore: _NoopPins(),
-        ),
-        throwsArgumentError,
-      );
+      expect(notice(pinned, _devB, ik1, ed1), isFalse);
     });
   });
 
@@ -995,13 +1098,4 @@ void main() {
       expect(n(b1), n(b2));
     });
   });
-}
-
-// ignore: deprecated_member_use_from_same_package
-class _NoopPins implements IdentityPinStore {
-  @override
-  Future<Uint8List?> getPinned(String sessionKey) async => null;
-
-  @override
-  Future<void> pin(String sessionKey, Uint8List identityKey) async {}
 }

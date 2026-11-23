@@ -3,13 +3,14 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
-/// @lastUpdated 2026-11-10
+/// @lastUpdated 2026-11-23 (bindings mandatory: every peer is a bound TestParty — the sender is
+///              verified from the binding embedded in its PreKey messages, not from a server-supplied
+///              Ed25519 key). Earlier 2026-11-10
 ///
 /// @functions
-///  - _newPeer(): Create a SignalProtocolService with identity + SPK #1 (+ optional OPKs)
-///  - _bundleWithOpk(): Prekey bundle that also advertises one one-time prekey
+///  - _peer(): A bound TestParty (account key + Signal identity + store) with its binding installed
+///  - _connect(): Initiator session from the responder's bound bundle (optionally with a one-time prekey)
 ///  - _send() / _recv(): Thin encrypt/decrypt wrappers for readability
-///  - _sealedCert(): Build a server-signed SenderCertificate for Sealed Sender tests
 ///  - Persistent PreKey: type-2 until first inbound decrypt; receive-first heal when the first type-2 is lost; survives store reload
 ///  - Type-2 archive fallback / OPK fail-loud: re-sent type-2 after reset
 ///  - X3DH domain separation: known-answer check of the 4DH/5DH HKDF info
@@ -27,135 +28,96 @@ import 'package:dart_signal_protocol/dart_signal_protocol.dart';
 import 'package:pinenacl/ed25519.dart' as ed;
 import 'package:test/test.dart';
 
-const _dev = 'device-1';
+import 'identity_test_support.dart';
 
-Future<SignalProtocolService> _newPeer({int opkStart = 0, int opkCount = 0}) async {
-  final s = SignalProtocolService();
-  await s.generateIdentityKeyPair();
-  await s.generateSignedPreKey(1);
-  if (opkCount > 0) await s.generateOneTimePreKeys(opkStart, opkCount);
-  return s;
+const _devA = '0a0a0a0a-0000-4000-8000-00000000000a';
+const _devB = '0b0b0b0b-0000-4000-8000-00000000000b';
+
+/// A bound user; its own binding is embedded in its PreKey messages.
+Future<TestParty> _peer(int seedByte, String deviceId) async {
+  final p = await TestParty.create(seedByte: seedByte, deviceId: deviceId);
+  p.signal.setLocalIdentityBinding(p.localBinding(epoch: 1000));
+  return p;
 }
 
-/// Bob's bundle plus one advertised one-time prekey (forces the 5-DH path).
-Future<Map<String, dynamic>> _bundleWithOpk(SignalProtocolService bob) async {
-  final bundle = await bob.getPreKeyBundle();
-  final opks = await bob.generateOneTimePreKeys(500, 1);
-  bundle['oneTimePreKey'] = opks.first;
-  return bundle;
-}
+Future<(TestParty, TestParty)> _aliceBob() async =>
+    (await _peer(1, _devA), await _peer(2, _devB));
 
-Future<Map<String, dynamic>> _send(
-  SignalProtocolService from,
-  String to,
-  String text,
-) =>
-    from.encryptMessage(
-      recipientId: to,
-      deviceId: _dev,
+/// [from] creates a session from [to]'s bound bundle. [withOpk] advertises
+/// one-time prekey #1 (the 5-DH path).
+Future<void> _connect(TestParty from, TestParty to, {bool withOpk = false}) =>
+    from.signal.createSession(
+      recipientId: to.peerId,
+      deviceId: to.deviceId,
+      preKeyBundle: to.bundle(
+        binding: to.bindingFor(epoch: 1000),
+        accountPublicKey: to.accountPub,
+        opkIndex: withOpk ? 0 : null,
+      ),
+    );
+
+Future<Map<String, dynamic>> _send(TestParty from, TestParty to, String text,
+        {SignalProtocolService? via}) =>
+    (via ?? from.signal).encryptMessage(
+      recipientId: to.peerId,
+      deviceId: to.deviceId,
       plaintext: Uint8List.fromList(utf8.encode(text)),
     );
 
 Future<String> _recv(
-  SignalProtocolService to,
-  String from,
-  Map<String, dynamic> enc, {
-  Uint8List? senderEd25519,
-}) async {
-  final pt = await to.decryptMessage(
-    senderId: from,
-    deviceId: _dev,
+    TestParty to, TestParty from, Map<String, dynamic> enc) async {
+  final pt = await to.signal.decryptMessage(
+    senderId: from.peerId,
+    deviceId: from.deviceId,
     ciphertext: enc['ciphertext'] as Uint8List,
     messageType: enc['messageType'] as int,
-    senderIdentityKeyEd25519: senderEd25519,
+    envelopeDeviceId: from.deviceId,
   );
   return utf8.decode(pt);
-}
-
-/// Server-signed Sender Certificate binding [identityKey] to the sender.
-SenderCertificate _sealedCert(ed.SigningKey serverKey, Uint8List identityKey) {
-  const snowchatId = 'snow05a3b2c4d6e8f0112233445566778899';
-  const deviceId = '12345678-1234-1234-1234-123456789012';
-  final expiry = DateTime.now().millisecondsSinceEpoch + 3600 * 1000;
-  final buffer = Uint8List(113);
-  var o = 0;
-  buffer[o] = 0x01;
-  o += 1;
-  buffer.setAll(o, snowchatId.codeUnits);
-  o += 36;
-  buffer.setAll(o, deviceId.codeUnits);
-  o += 36;
-  buffer.setAll(o, identityKey);
-  o += 32;
-  for (var i = 0; i < 8; i++) {
-    buffer[o + i] = (expiry >> (56 - 8 * i)) & 0xFF;
-  }
-  final signed = serverKey.sign(buffer);
-  return SenderCertificate(
-    version: 0x01,
-    senderSnowchatId: snowchatId,
-    senderDeviceId: deviceId,
-    senderIdentityKey: identityKey,
-    expiryMs: expiry,
-    serverSignature:
-        Uint8List.fromList(signed.sublist(0, ed.Signature.signatureLength)),
-  );
 }
 
 void main() {
   group('Persistent PreKey (receive-first bootstrap)', () {
     test('initiator keeps emitting type-2 until it decrypts an inbound message',
         () async {
-      final alice = await _newPeer();
-      final bob = await _newPeer();
-      await alice.createSession(
-          recipientId: 'bob',
-          deviceId: _dev,
-          preKeyBundle: await bob.getPreKeyBundle());
+      final (alice, bob) = await _aliceBob();
+      await _connect(alice, bob, withOpk: true);
 
-      final m1 = await _send(alice, 'bob', 'one');
-      final m2 = await _send(alice, 'bob', 'two');
-      final m3 = await _send(alice, 'bob', 'three');
+      final m1 = await _send(alice, bob, 'one');
+      final m2 = await _send(alice, bob, 'two');
+      final m3 = await _send(alice, bob, 'three');
       expect([m1, m2, m3].map((m) => m['messageType']), everyElement(2));
 
       // Bob receives all three; only the first runs X3DH, the rest decrypt
       // on the existing session (the one-time prekey is consumed once).
-      expect(await _recv(bob, 'alice', m1, senderEd25519: alice.verifyKey),
-          'one');
-      expect(await _recv(bob, 'alice', m2, senderEd25519: alice.verifyKey),
-          'two');
-      expect(await _recv(bob, 'alice', m3, senderEd25519: alice.verifyKey),
-          'three');
+      expect(await _recv(bob, alice, m1), 'one');
+      expect(await _recv(bob, alice, m2), 'two');
+      expect(await _recv(bob, alice, m3), 'three');
 
       // Bob's reply is a normal message (Bob is the responder).
-      final r1 = await _send(bob, 'alice', 'reply');
+      final r1 = await _send(bob, alice, 'reply');
       expect(r1['messageType'], 1);
-      expect(await _recv(alice, 'bob', r1), 'reply');
+      expect(await _recv(alice, bob, r1), 'reply');
 
       // Alice decrypted an inbound message → pending PreKey state retired.
-      final m4 = await _send(alice, 'bob', 'four');
+      final m4 = await _send(alice, bob, 'four');
       expect(m4['messageType'], 1);
-      expect(await _recv(bob, 'alice', m4), 'four');
+      expect(await _recv(bob, alice, m4), 'four');
     });
 
     test('receive-first peer bootstraps even when the first type-2 is lost',
         () async {
-      final alice = await _newPeer();
-      final bob = await _newPeer();
-      await alice.createSession(
-          recipientId: 'bob',
-          deviceId: _dev,
-          preKeyBundle: await _bundleWithOpk(bob));
+      final (alice, bob) = await _aliceBob();
+      await _connect(alice, bob, withOpk: true);
 
-      await _send(alice, 'bob', 'lost in transit'); // never delivered
-      final m2 = await _send(alice, 'bob', 'second');
+      await _send(alice, bob, 'lost in transit'); // never delivered
+      final m2 = await _send(alice, bob, 'second');
       expect(m2['messageType'], 2);
 
       // Pre-0.3.0 m2 was type-1 and Bob (no session) could never decrypt it.
-      expect(await _recv(bob, 'alice', m2, senderEd25519: alice.verifyKey),
-          'second');
-      final r = await _send(bob, 'alice', 'hi');
-      expect(await _recv(alice, 'bob', r), 'hi');
+      expect(await _recv(bob, alice, m2), 'second');
+      final r = await _send(bob, alice, 'hi');
+      expect(await _recv(alice, bob, r), 'hi');
     });
 
     test('pending PreKey state survives a session-store save/load', () async {
@@ -164,69 +126,57 @@ void main() {
       final path = '${dir.path}/store.bin';
       final key = Uint8List.fromList(List.generate(32, (i) => i));
 
-      final alice = await _newPeer();
-      final bob = await _newPeer();
-      await alice.createSession(
-          recipientId: 'bob',
-          deviceId: _dev,
-          preKeyBundle: await bob.getPreKeyBundle());
-      await _send(alice, 'bob', 'lost'); // first type-2 lost
-      alice.setStoreEncryptionKey(key);
-      expect(await alice.saveSessionStore(path), isTrue);
+      final (alice, bob) = await _aliceBob();
+      await _connect(alice, bob);
+      await _send(alice, bob, 'lost'); // first type-2 lost
+      alice.signal.setStoreEncryptionKey(key);
+      expect(await alice.signal.saveSessionStore(path), isTrue);
 
-      final restored = SignalProtocolService()..setStoreEncryptionKey(key);
+      final restored = SignalProtocolService(identityStore: alice.store)
+        ..setStoreEncryptionKey(key)
+        ..setLocalIdentityBinding(alice.localBinding(epoch: 1000));
       await restored.loadSessionStore(path);
-      final m = await _send(restored, 'bob', 'after restart');
+      final m = await _send(alice, bob, 'after restart', via: restored);
       expect(m['messageType'], 2);
-      expect(await _recv(bob, 'alice', m, senderEd25519: alice.verifyKey),
-          'after restart');
+      expect(await _recv(bob, alice, m), 'after restart');
     });
   });
 
   group('Type-2 re-send after reset', () {
     test('archived session decrypts a re-sent type-2 whose OPK is consumed',
         () async {
-      final alice = await _newPeer();
-      final bob = await _newPeer();
-      await alice.createSession(
-          recipientId: 'bob',
-          deviceId: _dev,
-          preKeyBundle: await _bundleWithOpk(bob));
+      final (alice, bob) = await _aliceBob();
+      await _connect(alice, bob, withOpk: true);
 
-      final m1 = await _send(alice, 'bob', 'first');
-      expect(await _recv(bob, 'alice', m1, senderEd25519: alice.verifyKey),
-          'first');
-      await bob.archiveSession('alice', _dev);
+      final m1 = await _send(alice, bob, 'first');
+      expect(await _recv(bob, alice, m1), 'first');
+      await bob.signal.archiveSession(alice.peerId, _devA);
 
       // Alice has not heard back, so m2 still names the consumed OPK.
       // _receiveSession fails (OPK gone) → the archive fallback recovers it.
-      final m2 = await _send(alice, 'bob', 'second');
+      final m2 = await _send(alice, bob, 'second');
       expect(m2['messageType'], 2);
-      expect(await _recv(bob, 'alice', m2, senderEd25519: alice.verifyKey),
-          'second');
-      expect(bob.archiveDecryptDirty, isTrue);
+      expect(await _recv(bob, alice, m2), 'second');
+      expect(bob.signal.archiveDecryptDirty, isTrue);
     });
 
     test('missing sender-named one-time prekey fails loud (no 4-DH fallthrough)',
         () async {
-      final alice = await _newPeer();
-      final bob = await _newPeer();
-      await alice.createSession(
-          recipientId: 'bob',
-          deviceId: _dev,
-          preKeyBundle: await _bundleWithOpk(bob));
+      final (alice, bob) = await _aliceBob();
+      await _connect(alice, bob, withOpk: true);
+      final opkId = bob.oneTimePreKeys.first['keyId'] as int;
 
-      final m1 = await _send(alice, 'bob', 'first');
-      await _recv(bob, 'alice', m1, senderEd25519: alice.verifyKey);
-      await bob.deleteSession('alice', _dev); // hard wipe, nothing archived
+      final m1 = await _send(alice, bob, 'first');
+      await _recv(bob, alice, m1);
+      await bob.signal.deleteSession(alice.peerId, _devA); // nothing archived
 
-      final m2 = await _send(alice, 'bob', 'second');
+      final m2 = await _send(alice, bob, 'second');
       await expectLater(
-        _recv(bob, 'alice', m2, senderEd25519: alice.verifyKey),
+        _recv(bob, alice, m2),
         throwsA(isA<SignalProtocolException>().having(
-            (e) => e.message, 'message', contains('One-time prekey #500'))),
+            (e) => e.message, 'message', contains('One-time prekey #$opkId'))),
       );
-      expect(await bob.hasSession('alice', _dev), isFalse,
+      expect(await bob.signal.hasSession(alice.peerId, _devA), isFalse,
           reason: 'no poisoned session may be installed');
     });
   });
@@ -282,71 +232,69 @@ void main() {
   });
 
   group('resolveSealedMessageType', () {
-    late SignalProtocolService alice;
-    late SignalProtocolService bob;
+    late TestParty alice;
+    late TestParty bob;
 
     setUp(() async {
-      alice = await _newPeer();
-      bob = await _newPeer();
-      await alice.createSession(
-          recipientId: 'bob',
-          deviceId: _dev,
-          preKeyBundle: await bob.getPreKeyBundle());
+      (alice, bob) = await _aliceBob();
+      await _connect(alice, bob);
     });
 
     test('prekey ciphertext with matching certificate identity → 2', () async {
-      final m = await _send(alice, 'bob', 'x');
+      final m = await _send(alice, bob, 'x');
       expect(
-        bob.resolveSealedMessageType(
-            m['ciphertext'] as Uint8List, alice.identityPublicKey!),
+        bob.signal.resolveSealedMessageType(
+            m['ciphertext'] as Uint8List, alice.identityKey),
         2,
       );
     });
 
     test('prekey ciphertext with a different certificate identity → rejected',
         () async {
-      final m = await _send(alice, 'bob', 'x');
+      final m = await _send(alice, bob, 'x');
       final other = X25519KeyPair.generate().publicKey;
       expect(
-        () => bob.resolveSealedMessageType(m['ciphertext'] as Uint8List, other),
+        () => bob.signal
+            .resolveSealedMessageType(m['ciphertext'] as Uint8List, other),
         throwsA(isA<StateError>()
             .having((e) => e.message, 'message', 'Sealed message rejected')),
       );
       // Length mismatch is rejected the same way.
       expect(
-        () => bob.resolveSealedMessageType(
+        () => bob.signal.resolveSealedMessageType(
             m['ciphertext'] as Uint8List, Uint8List(16)),
         throwsStateError,
       );
     });
 
     test('normal ciphertext → 1', () async {
-      final m1 = await _send(alice, 'bob', 'boot');
-      await _recv(bob, 'alice', m1, senderEd25519: alice.verifyKey);
-      final r = await _send(bob, 'alice', 'normal');
+      final m1 = await _send(alice, bob, 'boot');
+      await _recv(bob, alice, m1);
+      final r = await _send(bob, alice, 'normal');
       expect(r['messageType'], 1);
       expect(
-        alice.resolveSealedMessageType(
-            r['ciphertext'] as Uint8List, bob.identityPublicKey!),
+        alice.signal.resolveSealedMessageType(
+            r['ciphertext'] as Uint8List, bob.identityKey),
         1,
       );
     });
 
     test('non-JSON / partial headers degrade to 1; malformed prekey hex throws',
         () {
-      final key = alice.identityPublicKey!;
-      expect(bob.resolveSealedMessageType(Uint8List.fromList([0xFF, 0x00]), key),
+      final key = alice.identityKey;
+      final b = bob.signal;
+      expect(b.resolveSealedMessageType(Uint8List.fromList([0xFF, 0x00]), key),
           1);
       expect(
-          bob.resolveSealedMessageType(
+          b.resolveSealedMessageType(
               Uint8List.fromList(utf8.encode('[1,2,3]')), key),
           1);
       expect(
-          bob.resolveSealedMessageType(
+          b.resolveSealedMessageType(
               Uint8List.fromList(utf8.encode('{"identityKey":"ab"}')), key),
           1);
       expect(
-        () => bob.resolveSealedMessageType(
+        () => b.resolveSealedMessageType(
             Uint8List.fromList(
                 utf8.encode('{"identityKey":"zz","ephemeralKey":"00"}')),
             key),
@@ -361,29 +309,31 @@ void main() {
       final sealer = SealedSenderService(trustedServerKeys: [serverVerify]);
       final unsealer = SealedSenderService(trustedServerKeys: [serverVerify]);
 
-      final m = await _send(alice, 'bob', 'hello new contact');
+      final m = await _send(alice, bob, 'hello new contact');
       final envelope = sealer.seal(
-        recipientIdentityPubKey: bob.identityPublicKey!,
+        recipientIdentityPubKey: bob.identityKey,
         drCiphertext: m['ciphertext'] as Uint8List,
-        certificate: _sealedCert(serverKey, alice.identityPublicKey!),
+        certificate: testSenderCertificate(serverKey, alice),
         messageContext: sealedType1to1,
       );
       final unsealed = unsealer.unseal(
-        myIdentityPrivateKey: bob.identityPrivateKey!,
-        myIdentityPublicKey: bob.identityPublicKey!,
+        myIdentityPrivateKey: bob.signal.identityPrivateKey!,
+        myIdentityPublicKey: bob.identityKey,
         sealedEnvelope: envelope,
       );
 
       // The transport carries no messageType; recover it from the ciphertext.
-      final type = bob.resolveSealedMessageType(
+      final type = bob.signal.resolveSealedMessageType(
           unsealed.drCiphertext, unsealed.senderIdentityKey);
       expect(type, 2);
-      final pt = await bob.decryptMessage(
-        senderId: 'alice',
-        deviceId: _dev,
+      // The certificate names the sender and its device; the embedded
+      // binding is verified against both before any prekey is used.
+      final pt = await bob.signal.decryptMessage(
+        senderId: unsealed.senderSnowchatId,
+        deviceId: unsealed.senderDeviceId,
         ciphertext: unsealed.drCiphertext,
         messageType: type,
-        senderIdentityKeyEd25519: alice.verifyKey,
+        envelopeDeviceId: unsealed.senderDeviceId,
       );
       expect(utf8.decode(pt), 'hello new contact');
     });
@@ -391,7 +341,8 @@ void main() {
 
   group('Signed-prekey self-heal accessors', () {
     test('signedPreKeyPublicKey matches the advertised bundle', () async {
-      final s = SignalProtocolService();
+      final s =
+          SignalProtocolService(identityStore: InMemoryVerifiedIdentityStore());
       await s.generateIdentityKeyPair();
       expect(s.hasAnySignedPreKey, isFalse);
 
@@ -406,13 +357,12 @@ void main() {
 
     test('store lacking the advertised SPK is detectable before X3DH fails',
         () async {
-      final bob = await _newPeer();
-      final advertised = (await bob.getPreKeyBundle())['signedPreKey']
-          as Map<String, dynamic>;
+      final bob = await _peer(2, _devB);
+      final advertised = bob.preKeyBundle['signedPreKey'] as Map<String, dynamic>;
 
       // Bob lost his store but kept his identity (e.g. restore from seed).
-      final bobAfterLoss = SignalProtocolService()
-        ..setIdentityKeyPair(bob.identityPublicKey!, bob.identityPrivateKey!);
+      final bobAfterLoss = SignalProtocolService(identityStore: bob.store)
+        ..setIdentityKeyPair(bob.identityKey, bob.signal.identityPrivateKey!);
       expect(bobAfterLoss.signedPreKeyPublicKey(advertised['keyId'] as int),
           isNull,
           reason: 'caller must re-arm (generate + persist + re-advertise)');
@@ -423,7 +373,7 @@ void main() {
     test('returns false without a store key and writes nothing', () async {
       final dir = await Directory.systemTemp.createTemp('dsp_store_');
       addTearDown(() => dir.delete(recursive: true));
-      final s = await _newPeer();
+      final s = (await _peer(1, _devA)).signal;
       final path = '${dir.path}/store.bin';
       expect(await s.saveSessionStore(path), isFalse);
       expect(File(path).existsSync(), isFalse);
@@ -433,8 +383,7 @@ void main() {
       final dir = await Directory.systemTemp.createTemp('dsp_store_');
       addTearDown(() => dir.delete(recursive: true));
       final key = Uint8List.fromList(List.generate(32, (i) => 255 - i));
-      final s = await _newPeer()
-        ..setStoreEncryptionKey(key);
+      final s = (await _peer(1, _devA)).signal..setStoreEncryptionKey(key);
       final path = '${dir.path}/store.bin';
 
       final results = await Future.wait(
@@ -442,7 +391,9 @@ void main() {
       expect(results, everyElement(isTrue));
       expect(dir.listSync().map((e) => e.path), [path]);
 
-      final restored = SignalProtocolService()..setStoreEncryptionKey(key);
+      final restored =
+          SignalProtocolService(identityStore: InMemoryVerifiedIdentityStore())
+            ..setStoreEncryptionKey(key);
       await restored.loadSessionStore(path);
       expect(restored.signedPreKeyPublicKey(1), s.signedPreKeyPublicKey(1));
     });

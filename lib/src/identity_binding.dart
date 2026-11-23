@@ -33,7 +33,8 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
-/// @lastUpdated 2026-11-10
+/// @lastUpdated 2026-11-23 (accountKeyMatchesPeerId doc: no legacy peers — bindings are
+///              mandatory). Earlier 2026-11-10
 ///
 /// @functions
 ///  - IdentityIdScheme: pluggable account-key -> peer-id derivation
@@ -219,9 +220,9 @@ class IdentityBindingV1 {
   }
 
   /// True iff [accountPublicKey] is acceptable AND derives [peerId] under
-  /// [idScheme] (constant-time comparison). Used when a server hands out an
-  /// account key without a binding (legacy peer) so it can still be
-  /// remembered for the account-key Safety Number.
+  /// [idScheme] (constant-time comparison). Used before an account key is
+  /// pinned or remembered without a binding (an out-of-band pin, or a
+  /// server-supplied key for the Safety Number of a peer not met yet).
   static bool accountKeyMatchesPeerId(
     Uint8List? accountPublicKey,
     String peerId, {

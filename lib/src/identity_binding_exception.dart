@@ -2,8 +2,9 @@
 /// @description Hard-failure exception for Identity Binding v1. Raised when a
 ///              peer's key bundle / PreKey message carries a forged or
 ///              inconsistent identity binding, when a peer that proved a
-///              binding before shows up without one (downgrade), or when an
-///              epoch is replayed. Unlike transient Signal errors this is
+///              binding before shows up without one (downgrade), when a peer
+///              presents no binding at all (bindings are mandatory since
+///              0.4.0), or when an epoch is replayed. Unlike transient Signal errors this is
 ///              NEVER retryable: callers must surface it (the
 ///              VerifiedIdentityStore has already emitted a bindingRejected
 ///              event) and stop — retrying cannot change the outcome and only
@@ -16,7 +17,8 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
-/// @lastUpdated 2026-11-10
+/// @lastUpdated 2026-11-23 (bindingRequired: bindings are mandatory — a peer without one is
+///              refused like a forged one, never admitted under TOFU). Earlier 2026-11-10
 ///
 /// @functions
 ///  - IdentityBindingFailure: reason taxonomy
@@ -53,6 +55,11 @@ enum IdentityBindingFailure {
   /// The X25519 identity key in the message differs from the key the
   /// account bound for that device.
   identityKeyMismatch,
+
+  /// Peer presented no binding at all (and never proved one — a latched
+  /// peer gets [downgrade]). Bindings are mandatory: treated exactly like
+  /// tampering — refuse, never fall back to TOFU. Added in 0.4.0.
+  bindingRequired,
 }
 
 /// Typed, non-retryable identity failure. Extends [SignalProtocolException]

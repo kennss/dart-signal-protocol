@@ -8,37 +8,36 @@
 ///                verify binding -> account-key match with any recorded key ->
 ///                epoch latch (>= highest accepted; equal only for
 ///                byte-identical keys) -> record bound=true + raise latch.
-///                Same-account key change -> non-blocking "device keys
-///                changed" notice. Legacy -> bound promotion with different
-///                keys -> "interception suspected" warning.
-///              Unbound (no binding):
-///                latched peer -> IdentityBindingInvalidException(downgrade).
-///                Otherwise the Signal-style legacy policy:
-///                  unchanged -> accept; changed & not verified -> update +
-///                  notice + continue; changed & verified -> park the new
-///                  keys as "pending" and throw IdentityKeyChangedException
-///                  until the user re-verifies.
+///                A key change of a bound peer (same account) -> non-blocking
+///                "device keys changed" notice.
+///              Unbound (no binding): always refused — bindings are
+///                mandatory. A latched peer is refused as a downgrade, any
+///                other as bindingRequired. There is no TOFU fallback.
 ///
 ///              Pure policy over a VerifiedIdentityStore — no network and no
 ///              session state — so integrators can call it directly (e.g. to
 ///              pre-admit a peer from a non-consuming identity directory
 ///              BEFORE fetching / consuming a one-time prekey). Session
 ///              purging is done by SignalProtocolService using
-///              [AdmittedIdentity.boundIdentityKey].
+///              [AdmittedIdentity.identityKey].
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
-/// @lastUpdated 2026-11-10
+/// @lastUpdated 2026-11-23 (backport SnowChat 3df0cc5 / 0aa549b: bindings are mandatory —
+///              admitUnbound() and the legacy TOFU policy are gone, refuseUnbound() returns the
+///              downgrade / bindingRequired refusal; AdmittedIdentity is always a bound identity
+///              {identityKey, ed25519}; promotionNotice() -> keyChangeNotice(): only a bound peer's
+///              key change gives a notice). Earlier 2026-11-10
 ///
 /// @functions
 ///  - AdmittedIdentity: result of a successful admission
 ///  - RemoteDeviceIdentity / RemoteIdentityDirectory: server identity views
 ///  - IdentityAdmission.admitBound(): verify + record a bound identity
-///  - IdentityAdmission.admitUnbound(): latch check + legacy policy
+///  - IdentityAdmission.refuseUnbound(): the refusal for a peer without a binding
 ///  - IdentityAdmission.selectDevice(): pick the highest-epoch valid device
 ///  - IdentityAdmission.admitDirectory(): non-consuming pre-admission
 ///  - IdentityAdmission.reject(): emit a rejection event and build the exception
-///  - IdentityAdmission.promotionNotice(): notice kind for a key transition
+///  - IdentityAdmission.keyChangeNotice(): notice for a bound peer's key change
 library;
 
 import 'dart:typed_data';
@@ -46,29 +45,18 @@ import 'dart:typed_data';
 import 'identity_binding.dart';
 import 'identity_binding_exception.dart';
 import 'identity_bytes.dart';
-import 'identity_key_changed_exception.dart';
 import 'verified_identity_store.dart';
 
-/// Outcome of a successful admission.
+/// Outcome of a successful admission: the peer's account-signed identity.
+/// Every session (active or archived) whose remote IK differs from
+/// [identityKey] must be purged / refused.
 class AdmittedIdentity {
   final Uint8List identityKey;
-  final Uint8List? ed25519;
-  final bool bound;
-
-  /// Non-null when the peer is bound: every session (active or archived)
-  /// whose remote IK differs from this key must be purged / refused.
-  final Uint8List? boundIdentityKey;
-
-  /// Device of the bound identity (lets the Signal layer keep pre-binding
-  /// sessions of that same device instead of purging them).
-  final String? boundDeviceId;
+  final Uint8List ed25519;
 
   const AdmittedIdentity({
     required this.identityKey,
     required this.ed25519,
-    required this.bound,
-    this.boundIdentityKey,
-    this.boundDeviceId,
   });
 }
 
@@ -137,9 +125,10 @@ class IdentityAdmission {
 
   /// Pick the device to talk to. Among devices with a VALID binding, the
   /// highest epoch wins; others are ignored. When no device carries a
-  /// binding, the first device is used (legacy, single-device world). When
-  /// bindings are present but none verifies, the set is rejected — an honest
-  /// server drops invalid bindings at upload, so this is tampering.
+  /// binding, the first device is returned and the caller refuses it
+  /// ([refuseUnbound]). When bindings are present but none verifies, the set
+  /// is rejected — an honest server drops invalid bindings at upload, so
+  /// this is tampering.
   RemoteDeviceIdentity? selectDevice({
     required String peerId,
     required Uint8List? accountPublicKey,
@@ -177,9 +166,9 @@ class IdentityAdmission {
   /// Admit a peer from a NON-consuming identity directory BEFORE any
   /// one-time prekey is fetched, so a refused peer never costs an OPK.
   /// Selects the device (highest valid epoch, or the first when nobody is
-  /// bound), then runs [admitBound] / [admitUnbound] for it. Throws the typed
-  /// identity failures exactly like those; returns null when the directory
-  /// lists no device.
+  /// bound), then runs [admitBound] for it — a device without a binding is
+  /// refused ([refuseUnbound]). Throws the typed identity failures exactly
+  /// like those; returns null when the directory lists no device.
   Future<({RemoteDeviceIdentity device, AdmittedIdentity admitted})?>
       admitDirectory({
     required String peerId,
@@ -207,13 +196,7 @@ class IdentityAdmission {
         signature: b.signature,
       );
     } else {
-      admitted = await admitUnbound(
-        peerId: peerId,
-        deviceId: pick.deviceId,
-        identityKey: pick.identityKey,
-        ed25519: ed,
-        accountPublicKey: directory.accountPublicKey,
-      );
+      throw await refuseUnbound(peerId);
     }
     return (device: pick, admitted: admitted);
   }
@@ -261,13 +244,7 @@ class IdentityAdmission {
     // device/IK/Ed — e.g. a persistent PreKey message minted before a
     // re-sign): nothing can be replayed, accept without touching the store.
     if (sameKeysAsBound && (existing.epoch ?? -1) >= epoch) {
-      return AdmittedIdentity(
-        identityKey: identityKey,
-        ed25519: ed25519,
-        bound: true,
-        boundIdentityKey: identityKey,
-        boundDeviceId: deviceId,
-      );
+      return AdmittedIdentity(identityKey: identityKey, ed25519: ed25519);
     }
 
     if (latch != null) {
@@ -284,16 +261,18 @@ class IdentityAdmission {
       }
     }
 
-    if (existing != null) {
-      final kind = promotionNotice(
-        existing: existing,
-        deviceId: deviceId,
-        identityKey: identityKey,
-        ed25519: ed25519,
-      );
-      if (kind != null) {
-        store.emit(IdentityStoreEvent(kind: kind, peerId: peerId));
-      }
+    // A bound peer's key change (same account — checked above).
+    if (existing != null &&
+        keyChangeNotice(
+          existing: existing,
+          deviceId: deviceId,
+          identityKey: identityKey,
+          ed25519: ed25519,
+        )) {
+      store.emit(IdentityStoreEvent(
+        kind: IdentityEventKind.deviceKeysChanged,
+        peerId: peerId,
+      ));
     }
 
     await store.put(VerifiedIdentityRecord(
@@ -309,174 +288,41 @@ class IdentityAdmission {
     ));
     await store.raiseLatch(peerId, epoch);
 
-    return AdmittedIdentity(
-      identityKey: identityKey,
-      ed25519: ed25519,
-      bound: true,
-      boundIdentityKey: identityKey,
-      boundDeviceId: deviceId,
-    );
+    return AdmittedIdentity(identityKey: identityKey, ed25519: ed25519);
   }
 
-  /// Which notice (if any) a transition from [existing] to the bound
-  /// (deviceId, IK, Ed) deserves.
-  ///  - bound -> bound with any change: non-blocking device-keys notice.
-  ///  - legacy -> bound (post-hoc interception detection):
-  ///      * a legacy-sourced Ed is weak evidence -> only the IK is compared;
-  ///      * a pending (blocked) change that matches the bound keys was the
-  ///        real reinstall -> device notice;
-  ///      * a different recorded deviceId is reinstall evidence -> device
-  ///        notice (an honest reinstall must not trip the red alarm);
-  ///      * otherwise the keys used before were not the account-signed ones
-  ///        -> interceptionSuspected.
-  static IdentityEventKind? promotionNotice({
+  /// Whether moving from [existing] to the bound (deviceId, IK, Ed) is a key
+  /// change worth a non-blocking "device keys changed" notice: a BOUND
+  /// record whose device or keys differ. A record that only pins the account
+  /// key (out-of-band pin, Safety Number lookup) holds no keys — first keys
+  /// are no change.
+  static bool keyChangeNotice({
     required VerifiedIdentityRecord existing,
     required String deviceId,
     required Uint8List identityKey,
     required Uint8List ed25519,
   }) {
-    final ikChanged = existing.identityKey != null &&
-        !constantTimeEquals(existing.identityKey, identityKey);
-    if (existing.bound) {
-      final edChanged = existing.ed25519 != null &&
-          !constantTimeEquals(existing.ed25519, ed25519);
-      return (ikChanged || edChanged || existing.deviceId != deviceId)
-          ? IdentityEventKind.deviceKeysChanged
-          : null;
-    }
-    final edChanged = !existing.edLegacySourced &&
-        existing.ed25519 != null &&
+    if (!existing.bound) return false;
+    return existing.deviceId != deviceId ||
+        !constantTimeEquals(existing.identityKey, identityKey) ||
         !constantTimeEquals(existing.ed25519, ed25519);
-    if (existing.hasPendingChange) {
-      final pendingMatches = (existing.pendingIdentityKey == null ||
-              constantTimeEquals(existing.pendingIdentityKey, identityKey)) &&
-          (existing.pendingEd25519 == null ||
-              constantTimeEquals(existing.pendingEd25519, ed25519));
-      return pendingMatches
-          ? IdentityEventKind.deviceKeysChanged
-          : IdentityEventKind.interceptionSuspected;
-    }
-    if (!ikChanged && !edChanged) return null;
-    final reinstallEvidence =
-        existing.deviceId != null && existing.deviceId != deviceId;
-    return reinstallEvidence
-        ? IdentityEventKind.deviceKeysChanged
-        : IdentityEventKind.interceptionSuspected;
   }
 
-  /// Admission for a peer that presented NO binding.
-  ///
-  /// [identityKey] is the X25519 IK that will be used in X3DH (bundle IK on
-  /// send, PreKey header IK on receive). [ed25519] may be null on receive
-  /// when it is unknown. [accountPublicKey] is an optional server-supplied
-  /// account key (remembered only if it derives [peerId]).
-  Future<AdmittedIdentity> admitUnbound({
-    required String peerId,
-    required String? deviceId,
-    required Uint8List identityKey,
-    required Uint8List? ed25519,
-    Uint8List? accountPublicKey,
-  }) async {
-    if (await store.latchedEpoch(peerId, fresh: true) != null) {
-      throw reject(peerId, IdentityBindingFailure.downgrade);
-    }
-    final existing = await store.getFresh(peerId);
-    final knownAccount = existing?.accountPublicKey ??
-        (IdentityBindingV1.accountKeyMatchesPeerId(accountPublicKey, peerId,
-                idScheme: _scheme)
-            ? accountPublicKey
-            : null);
-
-    if (existing == null ||
-        (existing.identityKey == null && existing.ed25519 == null)) {
-      // First sighting (TOFU baseline for an unbound peer).
-      await store.put(VerifiedIdentityRecord(
-        peerId: peerId,
-        accountPublicKey: knownAccount,
-        deviceId: deviceId,
-        identityKey: Uint8List.fromList(identityKey),
-        ed25519: ed25519 == null ? null : Uint8List.fromList(ed25519),
-        updatedAt: DateTime.now().millisecondsSinceEpoch,
-      ));
-      return AdmittedIdentity(
-          identityKey: identityKey, ed25519: ed25519, bound: false);
-    }
-
-    final ikChanged = existing.identityKey != null &&
-        !constantTimeEquals(existing.identityKey, identityKey);
-    // A legacy-sourced Ed may come from a server-trusting lookup — never
-    // treat a difference against it as a key change; it is simply replaced
-    // by the Ed actually used for X3DH.
-    final edChanged = !existing.edLegacySourced &&
-        existing.ed25519 != null &&
-        ed25519 != null &&
-        !constantTimeEquals(existing.ed25519, ed25519);
-
-    if (!ikChanged && !edChanged) {
-      // Unchanged — fill in any field we did not know yet; keys that came
-      // back to the accepted value also clear a pending block.
-      final replaceLegacyEd = existing.edLegacySourced && ed25519 != null;
-      final needsFill = existing.identityKey == null ||
-          (existing.ed25519 == null && ed25519 != null) ||
-          replaceLegacyEd ||
-          (existing.accountPublicKey == null && knownAccount != null) ||
-          existing.hasPendingChange;
-      final effectiveEd =
-          replaceLegacyEd ? ed25519 : (existing.ed25519 ?? ed25519);
-      if (needsFill) {
-        await store.put(VerifiedIdentityRecord(
-          peerId: peerId,
-          accountPublicKey: existing.accountPublicKey ?? knownAccount,
-          deviceId: existing.deviceId ?? deviceId,
-          identityKey: existing.identityKey ?? identityKey,
-          ed25519: effectiveEd,
-          edLegacySourced: !replaceLegacyEd && existing.edLegacySourced,
-          updatedAt: DateTime.now().millisecondsSinceEpoch,
-        ));
-      }
-      return AdmittedIdentity(
-          identityKey: identityKey, ed25519: effectiveEd, bound: false);
-    }
-
-    final alreadyPending = existing.hasPendingChange;
-    final verified = alreadyPending || await store.isPeerVerified(peerId);
-    if (verified) {
-      await store.put(existing.copyWith(
-        pendingIdentityKey: identityKey,
-        pendingEd25519: ed25519,
-        pendingDeviceId: deviceId,
-      ));
-      // Notify only on the TRANSITION into the blocked state — every
-      // redelivery of a held message would otherwise re-emit the alarm.
-      if (!alreadyPending) {
-        store.emit(IdentityStoreEvent(
-          kind: IdentityEventKind.legacyKeyChangeBlocked,
-          peerId: peerId,
-        ));
-      }
-      throw IdentityKeyChangedException(
-        peerSnowchatId: peerId,
-        deviceId: deviceId,
-        expectedKey: Uint8List.fromList(
-            ikChanged ? existing.identityKey! : existing.ed25519!),
-        actualKey: Uint8List.fromList(ikChanged ? identityKey : ed25519!),
-      );
-    }
-
-    await store.put(VerifiedIdentityRecord(
-      peerId: peerId,
-      accountPublicKey: existing.accountPublicKey ?? knownAccount,
-      deviceId: deviceId ?? existing.deviceId,
-      identityKey: Uint8List.fromList(identityKey),
-      // An IK change without a known Ed means the old Ed is stale too.
-      ed25519: ed25519 ?? (ikChanged ? null : existing.ed25519),
-      updatedAt: DateTime.now().millisecondsSinceEpoch,
-    ));
-    store.emit(IdentityStoreEvent(
-      kind: IdentityEventKind.legacyKeyChanged,
-      peerId: peerId,
-    ));
-    return AdmittedIdentity(
-        identityKey: identityKey, ed25519: ed25519, bound: false);
+  /// The refusal for a peer that presented NO binding (send side: none in
+  /// the bundle / directory; receive side: none embedded and none the
+  /// directory holds). Bindings are mandatory: without this, a compromised
+  /// server could strip the binding of a peer this device has never seen
+  /// bound and get its own keys accepted. A peer this device has seen bound
+  /// (latched) is refused as a [IdentityBindingFailure.downgrade], any other
+  /// as [IdentityBindingFailure.bindingRequired]. Returns the exception for
+  /// the caller to throw (the event is emitted). Nothing is recorded.
+  Future<IdentityBindingInvalidException> refuseUnbound(String peerId) async {
+    final latched = await store.latchedEpoch(peerId, fresh: true) != null;
+    return reject(
+      peerId,
+      latched
+          ? IdentityBindingFailure.downgrade
+          : IdentityBindingFailure.bindingRequired,
+    );
   }
 }

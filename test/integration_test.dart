@@ -3,7 +3,8 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
+/// @lastUpdated 2026-11-23 (bindings mandatory: the 1:1 flows run between bound TestParty
+///              users — no senderIdentityKeyEd25519, no store-less service; English-only comments). Earlier 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
 ///
 /// @functions
 ///  - Full E2E: Alice and Bob initialize, create session, exchange 5 messages
@@ -18,64 +19,69 @@ import 'dart:typed_data';
 import 'package:dart_signal_protocol/dart_signal_protocol.dart';
 import 'package:test/test.dart';
 
+import 'identity_test_support.dart';
+
+const _devA = '0a0a0a0a-0000-4000-8000-00000000000a';
+const _devB = '0b0b0b0b-0000-4000-8000-00000000000b';
+
+/// Alice and Bob, each with an account-signed binding installed; Alice holds
+/// a session to Bob created from his bound bundle.
+Future<(TestParty, TestParty)> _boundPair() async {
+  final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
+  final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
+  alice.signal.setLocalIdentityBinding(alice.localBinding(epoch: 1000));
+  bob.signal.setLocalIdentityBinding(bob.localBinding(epoch: 1000));
+  await alice.signal.createSession(
+    recipientId: bob.peerId,
+    deviceId: _devB,
+    preKeyBundle: bob.bundle(
+        binding: bob.bindingFor(epoch: 1000), accountPublicKey: bob.accountPub),
+  );
+  return (alice, bob);
+}
+
 void main() {
   group('Integration — full 1:1 E2E flow', () {
     test('Alice and Bob exchange 5 messages via SignalProtocolService',
         () async {
-      // -- Setup Alice --
-      final alice = SignalProtocolService();
-      await alice.generateIdentityKeyPair();
-      await alice.generateSignedPreKey(1);
-      await alice.generateOneTimePreKeys(100, 5);
-      await alice.getPreKeyBundle(); // warm-up; Alice's bundle isn't consumed in this flow
+      final (aliceParty, bobParty) = await _boundPair();
+      final alice = aliceParty.signal;
+      final bob = bobParty.signal;
+      final aliceId = aliceParty.peerId;
+      final bobId = bobParty.peerId;
 
-      // -- Setup Bob --
-      final bob = SignalProtocolService();
-      await bob.generateIdentityKeyPair();
-      await bob.generateSignedPreKey(1);
-      await bob.generateOneTimePreKeys(200, 5);
-      final bobBundle = await bob.getPreKeyBundle();
-
-      // -- Alice creates session with Bob's bundle --
-      await alice.createSession(
-        recipientId: 'bob',
-        deviceId: 'device-1',
-        preKeyBundle: bobBundle,
-      );
-
-      // -- Alice sends first message (pre-key message) --
+      // -- Alice sends first message (pre-key message, binding embedded) --
       final enc1 = await alice.encryptMessage(
-        recipientId: 'bob',
-        deviceId: 'device-1',
+        recipientId: bobId,
+        deviceId: _devB,
         plaintext: Uint8List.fromList(utf8.encode('Hello Bob!')),
       );
       expect(enc1['messageType'], 2); // pre-key message
 
-      // -- Bob decrypts first message (establishes session) --
-      // TOFU receive-side: supply Alice's Ed25519 verify key so _receiveSession
-      // can pin / compare. Tests simulate the prekey-bundle lookup.
+      // -- Bob decrypts first message: Alice's embedded binding is verified
+      // offline before any prekey is used, then the session is established.
       final dec1 = await bob.decryptMessage(
-        senderId: 'alice',
-        deviceId: 'device-1',
+        senderId: aliceId,
+        deviceId: _devA,
         ciphertext: enc1['ciphertext'] as Uint8List,
         messageType: enc1['messageType'] as int,
-        senderIdentityKeyEd25519: alice.verifyKey,
+        envelopeDeviceId: _devA,
       );
       expect(utf8.decode(dec1), 'Hello Bob!');
 
       // -- Exchange 4 more messages --
       // Alice -> Bob
       final enc2 = await alice.encryptMessage(
-        recipientId: 'bob',
-        deviceId: 'device-1',
+        recipientId: bobId,
+        deviceId: _devB,
         plaintext: Uint8List.fromList(utf8.encode('Message 2')),
       );
       // Persistent PreKey (0.3.0): Alice has not yet decrypted anything from
       // Bob, so she keeps emitting PreKey (type-2) messages until Bob replies.
       expect(enc2['messageType'], 2);
       final dec2 = await bob.decryptMessage(
-        senderId: 'alice',
-        deviceId: 'device-1',
+        senderId: aliceId,
+        deviceId: _devA,
         ciphertext: enc2['ciphertext'] as Uint8List,
         messageType: enc2['messageType'] as int,
       );
@@ -83,13 +89,13 @@ void main() {
 
       // Bob -> Alice
       final enc3 = await bob.encryptMessage(
-        recipientId: 'alice',
-        deviceId: 'device-1',
+        recipientId: aliceId,
+        deviceId: _devA,
         plaintext: Uint8List.fromList(utf8.encode('Bob reply 1')),
       );
       final dec3 = await alice.decryptMessage(
-        senderId: 'bob',
-        deviceId: 'device-1',
+        senderId: bobId,
+        deviceId: _devB,
         ciphertext: enc3['ciphertext'] as Uint8List,
         messageType: enc3['messageType'] as int,
       );
@@ -100,14 +106,14 @@ void main() {
 
       // Alice -> Bob
       final enc4 = await alice.encryptMessage(
-        recipientId: 'bob',
-        deviceId: 'device-1',
+        recipientId: bobId,
+        deviceId: _devB,
         plaintext: Uint8List.fromList(utf8.encode('Message 4')),
       );
       expect(enc4['messageType'], 1);
       final dec4 = await bob.decryptMessage(
-        senderId: 'alice',
-        deviceId: 'device-1',
+        senderId: aliceId,
+        deviceId: _devA,
         ciphertext: enc4['ciphertext'] as Uint8List,
         messageType: enc4['messageType'] as int,
       );
@@ -115,13 +121,13 @@ void main() {
 
       // Bob -> Alice
       final enc5 = await bob.encryptMessage(
-        recipientId: 'alice',
-        deviceId: 'device-1',
+        recipientId: aliceId,
+        deviceId: _devA,
         plaintext: Uint8List.fromList(utf8.encode('Bob reply 2')),
       );
       final dec5 = await alice.decryptMessage(
-        senderId: 'bob',
-        deviceId: 'device-1',
+        senderId: bobId,
+        deviceId: _devB,
         ciphertext: enc5['ciphertext'] as Uint8List,
         messageType: enc5['messageType'] as int,
       );
@@ -129,27 +135,23 @@ void main() {
     });
 
     test('hasSession and deleteSession work correctly', () async {
-      final alice = SignalProtocolService();
-      await alice.generateIdentityKeyPair();
-      await alice.generateSignedPreKey(1);
+      final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
+      final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
 
-      final bob = SignalProtocolService();
-      await bob.generateIdentityKeyPair();
-      await bob.generateSignedPreKey(1);
-      final bobBundle = await bob.getPreKeyBundle();
+      expect(await alice.signal.hasSession(bob.peerId, _devB), isFalse);
 
-      expect(await alice.hasSession('bob', 'device-1'), isFalse);
-
-      await alice.createSession(
-        recipientId: 'bob',
-        deviceId: 'device-1',
-        preKeyBundle: bobBundle,
+      await alice.signal.createSession(
+        recipientId: bob.peerId,
+        deviceId: _devB,
+        preKeyBundle: bob.bundle(
+            binding: bob.bindingFor(epoch: 1000),
+            accountPublicKey: bob.accountPub),
       );
 
-      expect(await alice.hasSession('bob', 'device-1'), isTrue);
+      expect(await alice.signal.hasSession(bob.peerId, _devB), isTrue);
 
-      await alice.deleteSession('bob', 'device-1');
-      expect(await alice.hasSession('bob', 'device-1'), isFalse);
+      await alice.signal.deleteSession(bob.peerId, _devB);
+      expect(await alice.signal.hasSession(bob.peerId, _devB), isFalse);
     });
   });
 
@@ -231,10 +233,12 @@ void main() {
 
   group('Integration — group via SignalProtocolService', () {
     test('group encrypt/decrypt via high-level API', () async {
-      final alice = SignalProtocolService();
+      final alice = SignalProtocolService(
+          identityStore: InMemoryVerifiedIdentityStore());
       await alice.generateIdentityKeyPair();
 
-      final bob = SignalProtocolService();
+      final bob = SignalProtocolService(
+          identityStore: InMemoryVerifiedIdentityStore());
       await bob.generateIdentityKeyPair();
 
       const groupId = 'group-svc-1';
@@ -272,37 +276,22 @@ void main() {
 
   group('Integration — mixed 1:1 + group', () {
     test('1:1 and group messaging coexist without interference', () async {
-      // Setup two users with both 1:1 and group capabilities
-      final alice = SignalProtocolService();
-      await alice.generateIdentityKeyPair();
-      await alice.generateSignedPreKey(1);
-      await alice.generateOneTimePreKeys(100, 5);
-
-      final bob = SignalProtocolService();
-      await bob.generateIdentityKeyPair();
-      await bob.generateSignedPreKey(1);
-      await bob.generateOneTimePreKeys(200, 5);
-
-      final bobBundle = await bob.getPreKeyBundle();
+      final (aliceParty, bobParty) = await _boundPair();
+      final alice = aliceParty.signal;
+      final bob = bobParty.signal;
 
       // -- 1:1 session --
-      await alice.createSession(
-        recipientId: 'bob',
-        deviceId: 'device-1',
-        preKeyBundle: bobBundle,
-      );
-
       final enc1to1 = await alice.encryptMessage(
-        recipientId: 'bob',
-        deviceId: 'device-1',
+        recipientId: bobParty.peerId,
+        deviceId: _devB,
         plaintext: Uint8List.fromList(utf8.encode('Private DM')),
       );
       final dec1to1 = await bob.decryptMessage(
-        senderId: 'alice',
-        deviceId: 'device-1',
+        senderId: aliceParty.peerId,
+        deviceId: _devA,
         ciphertext: enc1to1['ciphertext'] as Uint8List,
         messageType: enc1to1['messageType'] as int,
-        senderIdentityKeyEd25519: alice.verifyKey,
+        envelopeDeviceId: _devA,
       );
       expect(utf8.decode(dec1to1), 'Private DM');
 
@@ -325,13 +314,13 @@ void main() {
 
       // -- Verify 1:1 still works after group --
       final enc1to1b = await alice.encryptMessage(
-        recipientId: 'bob',
-        deviceId: 'device-1',
+        recipientId: bobParty.peerId,
+        deviceId: _devB,
         plaintext: Uint8List.fromList(utf8.encode('Still private')),
       );
       final dec1to1b = await bob.decryptMessage(
-        senderId: 'alice',
-        deviceId: 'device-1',
+        senderId: aliceParty.peerId,
+        deviceId: _devA,
         ciphertext: enc1to1b['ciphertext'] as Uint8List,
         messageType: enc1to1b['messageType'] as int,
       );
@@ -341,7 +330,8 @@ void main() {
 
   group('Integration — error handling', () {
     test('encrypt without session throws SignalProtocolException', () async {
-      final alice = SignalProtocolService();
+      final alice = SignalProtocolService(
+          identityStore: InMemoryVerifiedIdentityStore());
       await alice.generateIdentityKeyPair();
 
       expect(
@@ -355,7 +345,8 @@ void main() {
     });
 
     test('decrypt without session throws SignalProtocolException', () async {
-      final bob = SignalProtocolService();
+      final bob = SignalProtocolService(
+          identityStore: InMemoryVerifiedIdentityStore());
       await bob.generateIdentityKeyPair();
 
       expect(
@@ -371,7 +362,8 @@ void main() {
 
     test('generateIdentityKeyPair required before session operations',
         () async {
-      final svc = SignalProtocolService();
+      final svc = SignalProtocolService(
+          identityStore: InMemoryVerifiedIdentityStore());
 
       expect(
         () => svc.createSession(

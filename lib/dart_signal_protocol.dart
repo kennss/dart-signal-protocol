@@ -5,7 +5,8 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-07
-/// @lastUpdated 2026-11-23 (ed25519_strict and sealed_plaintext exports). Earlier 2026-11-10 (Identity Binding v1 exports: binding, admission, verified identity store, Safety Number)
+/// @lastUpdated 2026-11-23 (ed25519_strict and sealed_plaintext exports; identity_pin_store and
+///              identity_key_changed_exception removed with the legacy TOFU model). Earlier 2026-11-10 (Identity Binding v1 exports: binding, admission, verified identity store, Safety Number)
 
 library dart_signal_protocol;
 
@@ -16,9 +17,8 @@ library dart_signal_protocol;
 //  - files:           file_encryptor
 //  - Sealed Sender:   sealed_plaintext, sealed_sender, sender_certificate
 //  - identity:        identity_admission, identity_binding,
-//                     identity_binding_exception, identity_key_changed_exception,
-//                     safety_number, verified_identity_store
-//                     (identity_pin_store is DEPRECATED — TOFU only)
+//                     identity_binding_exception, safety_number,
+//                     verified_identity_store
 //  - orchestrator:    signal_protocol_service
 //  - logging:         logger (setSignalProtocolLogger only)
 export 'src/double_ratchet.dart';
@@ -28,8 +28,6 @@ export 'src/hkdf.dart';
 export 'src/identity_admission.dart';
 export 'src/identity_binding.dart';
 export 'src/identity_binding_exception.dart';
-export 'src/identity_key_changed_exception.dart';
-export 'src/identity_pin_store.dart';
 export 'src/logger.dart' show setSignalProtocolLogger;
 export 'src/message_send_log.dart';
 export 'src/prekey_bundle.dart';
