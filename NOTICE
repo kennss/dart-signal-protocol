@@ -1,0 +1,13 @@
+dart_signal_protocol
+Copyright 2026 Kennt Kim, Calida Lab
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Versions up to and including 0.4.0 were published under the GNU Affero
+General Public License v3.0; those releases remain available under it.
+
+This product depends on pinenacl (https://github.com/ilap/pinenacl-dart),
+Copyright (c) 2018 Pal Dorogi, licensed under the MIT License.
+
+The Signal Protocol specifications (https://signal.org/docs/) are published by
+Signal Messenger, LLC. This is an independent implementation written from those
+specifications; it contains no code from libsignal.

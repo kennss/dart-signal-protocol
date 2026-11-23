@@ -192,11 +192,13 @@ Disagreements are fine. Personal attacks are not.
 ## License
 
 By contributing, you agree that your contributions will be licensed
-under the same [GNU AGPL-3.0](LICENSE) that covers the project.
+under the same [Apache License 2.0](LICENSE) that covers the project
+(Apache-2.0 section 5).
 
-If you need to contribute code that you are not able to license under
-AGPL-3.0 (for example, because your employer requires different
-terms), open an issue first to discuss before submitting a PR.
+Do not submit code copied or translated from Signal's `libsignal` or
+from any other AGPL/GPL-licensed project: this library is an
+independent implementation written from the published specifications,
+and must stay that way to remain Apache-2.0.
 
 ## Questions?
 

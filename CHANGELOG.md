@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-23
+
+### License
+
+- **Relicensed from AGPL-3.0 to Apache-2.0.** The library is an independent
+  implementation written from the Signal Protocol specifications by its sole
+  author, with no code from `libsignal`, so it can be offered under a
+  permissive license: usable in closed-source apps and in apps distributed
+  through the App Store and Google Play. Added a `NOTICE` file. Versions up
+  to and including 0.4.0 remain available under the AGPL-3.0.
+- No code changes.
+
 ## [0.4.0] - 2026-11-23
 
 Third backport from the reference SnowChat deployment, covering what the

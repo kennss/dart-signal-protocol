@@ -2,8 +2,8 @@
 
 > **A Pure Dart implementation of the Signal protocol family — X3DH, Double Ratchet, Sender Key and Sealed Sender — with one dependency and no native code.**
 
-[![Pub Version](https://img.shields.io/badge/pub-0.4.0-orange.svg)](#)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Pub Version](https://img.shields.io/badge/pub-0.4.1-orange.svg)](#)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20Android%20%7C%20Desktop%20%7C%20Dart%20VM-blue.svg)](#)
 
 `dart_signal_protocol` delivers the **full Signal Protocol stack in Pure Dart**: X3DH key agreement, Double Ratchet messaging, Sender Key group encryption, and **Sealed Sender** (sender anonymity). No Platform Channels, no native binaries, no JNI/Swift bridges — one codebase that runs identically on iOS, Android, Desktop, and Dart VM targets.
@@ -437,7 +437,7 @@ The original SnowChat project provides storage, networking, identity-store and g
 | **Server-proof identity keys** | ✅ Identity Binding v1 (account-signed, mandatory) | Safety Numbers / key transparency |
 | **Wire format** | self-compatible | libsignal canonical |
 
-**Key takeaway**: libsignal has the audit pedigree, 2 billion users, and features (PNI, ZKGroup) we do not offer. We provide **Pure Dart portability and Sealed Sender support without native bindings**. Choose based on your platform constraints and threat model. Both libraries are AGPL-3.0.
+**Key takeaway**: libsignal has the audit pedigree, 2 billion users, and features (PNI, ZKGroup) we do not offer. We provide **Pure Dart portability and Sealed Sender support without native bindings**. Choose based on your platform constraints and threat model. This library is Apache-2.0; libsignal is AGPL-3.0.
 
 ---
 
@@ -471,13 +471,13 @@ For security-sensitive vulnerabilities, please follow [`SECURITY.md`](SECURITY.m
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+[Apache License 2.0](LICENSE) — see also [`NOTICE`](NOTICE).
 
 Copyright (C) 2026 Kennt Kim, Calida Lab.
 
-This library is released under the AGPL-3.0 — the same license used by Signal's reference implementation (`libsignal`). The license applies the standard copyleft obligations of GPL-3.0, and additionally requires that users interacting with a modified version over a network be offered the corresponding source code (§13).
+Since 0.4.1 this library is released under the Apache-2.0 license, so it can be used in open-source and closed-source applications alike, including apps distributed through the App Store and Google Play. Versions up to and including 0.4.0 were published under the GNU AGPL-3.0 and remain available under those terms.
 
-If AGPL-3.0 is incompatible with your project, contact the copyright holder (kennt@calidalab.ai) about a commercial license.
+This is an independent implementation written from the Signal Protocol specifications; it contains no code from Signal's `libsignal` (which is AGPL-3.0).
 
 ---
 
