@@ -1,9 +1,12 @@
 /// @file        signal_protocol_service.dart
-/// @description Pure Dart implementation of the Signal Protocol. X3DH, Double Ratchet, Sender Key and PreKey management built on pinenacl
+/// @description Pure Dart implementation of the Signal Protocol 1:1 layer: X3DH, Double Ratchet, PreKey management and Identity Binding v1 admission, built on pinenacl. (Sender Key group messaging is the standalone SenderKeyManager.)
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-29
-/// @lastUpdated 2026-11-23 (backport SnowChat 3df0cc5 / 0aa549b — bindings mandatory, legacy TOFU
+/// @lastUpdated 2026-11-23 (backport SnowChat f137f43 / Part 3 E: no Sender Key manager, SKDM tracker,
+///              group encrypt/decrypt or message send log here — SenderKeyManager is standalone and the
+///              caller persists it; the session store no longer writes `senderKeys` /
+///              `messageSendLog` and ignores them on load. Backport SnowChat 3df0cc5 / 0aa549b — bindings mandatory, legacy TOFU
 ///              removed: identityStore is required; the deprecated IdentityPinStore, the
 ///              senderIdentityKeyEd25519 receive path, admitUnbound / IdentityKeyChangedException, the
 ///              one-time legacy IK seeding and remoteIdentityKeySnapshot() are gone; a peer without a
@@ -27,10 +30,6 @@
 ///  - SignalProtocolService.encryptMessage(): Double Ratchet message encryption (keeps emitting PreKey/type-2 until the peer replies)
 ///  - SignalProtocolService.decryptMessage(): Double Ratchet decryption — trial-decrypt + archived-session fallback; retires pending-PreKey state on inbound success
 ///  - SignalProtocolService.resolveSealedMessageType(): Recover Signal messageType from an unsealed DR ciphertext + Sealed Sender Step 9 identity cross-check
-///  - SignalProtocolService.createSenderKey(): Create a group Sender Key
-///  - SignalProtocolService.processSenderKey(): Process a group Sender Key
-///  - SignalProtocolService.encryptGroupMessage(): Encrypt a group message
-///  - SignalProtocolService.decryptGroupMessage(): Decrypt a group message
 ///  - SignalProtocolService.saveSessionStore(): Atomically save encrypted session state (including archived sessions); returns whether bytes reached disk
 ///  - SignalProtocolService.loadSessionStore(): Load session state (restore archived sessions + TTL check)
 ///  - SignalProtocolService.setLocalIdentityBinding(): install our binding for type-2 embedding
@@ -54,10 +53,7 @@ import 'identity_binding.dart';
 import 'identity_binding_exception.dart';
 import 'identity_bytes.dart' show constantTimeEquals;
 import 'logger.dart';
-import 'message_send_log.dart';
 import 'prekey_bundle.dart';
-import 'sender_key.dart';
-import 'sender_key_tracker.dart';
 import 'verified_identity_store.dart';
 import 'x25519.dart';
 import 'x3dh.dart';
@@ -293,10 +289,6 @@ class SignalProtocolService {
     _archivedSessions.clear();
     // Do NOT clear _signedPreKeys and _oneTimePreKeys — they are needed
     // by _receiveSession() to process incoming prekey messages.
-    _senderKeyManager = SenderKeyManager();
-    // Also reset the in-memory SKDM tracker so the next group send
-    // re-distributes to all members.
-    _skdmTracker = SenderKeyDistributionTracker();
     debugPrint('[SignalProtocolService] All sessions cleared (prekeys kept)');
   }
 
@@ -664,18 +656,6 @@ class SignalProtocolService {
 
   /// Registration ID for this device.
   int? _registrationId;
-
-  /// Group sender key manager (full Sender Key protocol).
-  SenderKeyManager _senderKeyManager = SenderKeyManager();
-
-  /// SKDM distribution tracker — tracks which members have received the
-  /// current Sender Key to avoid redundant O(N) re-sends.
-  SenderKeyDistributionTracker _skdmTracker = SenderKeyDistributionTracker();
-  SenderKeyDistributionTracker get skdmTracker => _skdmTracker;
-
-  /// Message send log for retry requests.
-  MessageSendLog _messageSendLog = MessageSendLog();
-  MessageSendLog get messageSendLog => _messageSendLog;
 
   /// Random generator for registration IDs.
   static final _rng = Random.secure();
@@ -1333,80 +1313,6 @@ class SignalProtocolService {
   }
 
   // ---------------------------------------------------------------------------
-  // Group Messaging (Sender Keys)
-  // ---------------------------------------------------------------------------
-
-  /// Access the underlying SenderKeyManager for direct usage by group
-  /// session managers.
-  SenderKeyManager get senderKeyManager => _senderKeyManager;
-
-  /// Create a Sender Key for the given [groupId].
-  /// Returns the distribution message bytes and distribution info.
-  Future<Map<String, dynamic>> createSenderKey(
-    String groupId, {
-    String? myId,
-  }) async {
-    final senderId = myId ?? 'self';
-    final distribution = _senderKeyManager.createSenderKey(groupId, senderId);
-    return {
-      'senderKeyMessage': distribution.serialize(),
-      'distributionId': 'dist_$groupId',
-      'groupId': groupId,
-      'senderId': senderId,
-    };
-  }
-
-  /// Process a Sender Key distribution message from another group member.
-  Future<void> processSenderKey(
-    String groupId,
-    String senderId,
-    Map<String, dynamic> senderKeyMessage,
-  ) async {
-    final data = senderKeyMessage['senderKeyMessage'] as Uint8List;
-    final distribution = SenderKeyDistributionMessage.deserialize(data);
-    _senderKeyManager.processSenderKey(distribution);
-  }
-
-  /// Encrypt [plaintext] for the group using the local Sender Key.
-  Future<Uint8List> encryptGroupMessage(
-    String groupId,
-    Uint8List plaintext, {
-    String? myId,
-  }) async {
-    final senderId = myId ?? 'self';
-    try {
-      return _senderKeyManager.encryptGroupMessage(
-        groupId,
-        senderId,
-        plaintext,
-      );
-    } catch (e) {
-      throw SignalProtocolException(
-        'Failed to encrypt group message: $e',
-      );
-    }
-  }
-
-  /// Decrypt a group message from [senderId] in [groupId].
-  Future<Uint8List> decryptGroupMessage(
-    String groupId,
-    String senderId,
-    Uint8List ciphertext,
-  ) async {
-    try {
-      return _senderKeyManager.decryptGroupMessage(
-        groupId,
-        senderId,
-        ciphertext,
-      );
-    } catch (e) {
-      throw SignalProtocolException(
-        'Failed to decrypt group message from $senderId in $groupId: $e',
-      );
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Session Store Persistence
   // ---------------------------------------------------------------------------
 
@@ -1494,24 +1400,12 @@ class SignalProtocolService {
     }
     store['oneTimePreKeys'] = opkMap;
 
-    // Sender keys
-    store['senderKeys'] = _senderKeyManager.toJson();
-
     // Remote identity keys for Sealed Sender
     final remoteIdMap = <String, String>{};
     for (final entry in _remoteIdentityKeys.entries) {
       remoteIdMap[entry.key] = _bytesToHex(entry.value);
     }
     store['remoteIdentityKeys'] = remoteIdMap;
-
-    // SKDM distribution tracker is in-memory only — never persisted.
-    // Persisting caused "delivered but lost across restart" bugs because
-    // the receiver's session store could be reset while the sender still
-    // believed delivery had succeeded. A reactive sender_key_request handles
-    // any cross-restart misses.
-
-    // Message send log for retry (1:1 + group, 24h TTL)
-    store['messageSendLog'] = _messageSendLog.toJson();
 
     try {
       final jsonBytes = Uint8List.fromList(utf8.encode(jsonEncode(store)));
@@ -1725,19 +1619,10 @@ class SignalProtocolService {
         }
       }
 
-      // Sender keys
-      final senderKeysMap = store['senderKeys'] as Map<String, dynamic>?;
-      if (senderKeysMap != null) {
-        _senderKeyManager = SenderKeyManager.fromJson(senderKeysMap);
-        // If fromJson dropped malformed legacy entries, persist a clean
-        // store on the next microtask to avoid re-entering load.
-        if (_senderKeyManager.needsResave) {
-          debugPrint('[SignalProtocolService] Pruned malformed sender keys '
-              '— scheduling re-save');
-          _senderKeyManager.needsResave = false;
-          Future.microtask(() => saveSessionStore(path));
-        }
-      }
+      // Stores written before 0.4.0 may hold `senderKeys` (Sender Key state,
+      // now persisted by the caller from SenderKeyManager.toJson) and
+      // `messageSendLog` (plaintexts kept for retries — removed). Neither is
+      // read; the next save drops them.
 
       // Restore remote identity keys for Sealed Sender
       final remoteIdMap =
@@ -1752,16 +1637,6 @@ class SignalProtocolService {
       // Sessions persisted before 0.3.0 carry no remoteIdentityKey: they never
       // match a bound identity and are purged the first time the peer's
       // bound sessions are enforced (enforceBoundSessions).
-
-      // SKDM tracker is in-memory only — never restored from disk. Reactive
-      // sender_key_request handles any cross-restart misses.
-      _skdmTracker = SenderKeyDistributionTracker();
-
-      // Message send log for retry
-      final sendLogMap = store['messageSendLog'] as Map<String, dynamic>?;
-      if (sendLogMap != null) {
-        _messageSendLog = MessageSendLog.fromJson(sendLogMap);
-      }
 
       final totalSessions =
           _sessions.values.fold<int>(0, (sum, list) => sum + list.length);

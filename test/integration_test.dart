@@ -4,12 +4,15 @@
 /// @company     Calida Lab
 /// @created     2026-04-10
 /// @lastUpdated 2026-11-23 (bindings mandatory: the 1:1 flows run between bound TestParty
-///              users — no senderIdentityKeyEd25519, no store-less service; English-only comments). Earlier 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
+///              users — no senderIdentityKeyEd25519, no store-less service; Sender Key wire format v4:
+///              the group flows use SenderKeyManager with a binding, and the mixed flow distributes
+///              the 72-byte key over the 1:1 session; no group API on SignalProtocolService;
+///              English-only comments). Earlier 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
 ///
 /// @functions
 ///  - Full E2E: Alice and Bob initialize, create session, exchange 5 messages
-///  - Group: 3 members, each sends a message, all receive all
-///  - Mixed: 1:1 and group in same test
+///  - Group: 3 members, each sends a message, all receive all (v4, bound)
+///  - Mixed: the Sender Key distributed over the 1:1 session, then a group message
 ///  - SignalProtocolService full lifecycle
 library;
 
@@ -157,174 +160,94 @@ void main() {
 
   group('Integration — group E2E flow', () {
     test('3 members: each sends a message, all receive all', () async {
-      final aliceMgr = SenderKeyManager();
-      final bobMgr = SenderKeyManager();
-      final charlieMgr = SenderKeyManager();
-
       const groupId = 'group-test-1';
+      const members = ['alice', 'bob', 'charlie'];
+      final managers = {for (final m in members) m: SenderKeyManager()};
 
-      // Each member creates their sender key and distributes to others
-      final aliceSkdm = aliceMgr.createSenderKey(groupId, 'alice');
-      final bobSkdm = bobMgr.createSenderKey(groupId, 'bob');
-      final charlieSkdm = charlieMgr.createSenderKey(groupId, 'charlie');
+      // Each member creates their sender key and gives it to the others.
+      for (final from in members) {
+        final skdm = managers[from]!.createSenderKey(groupId, from);
+        for (final to in members.where((m) => m != from)) {
+          expect(managers[to]!.processSenderKey(skdm), isTrue);
+        }
+      }
 
-      // Distribute all SKDMs to all members
-      bobMgr.processSenderKey(aliceSkdm);
-      charlieMgr.processSenderKey(aliceSkdm);
+      // The binding ties each message to its context (here: the group and
+      // a message id), computed alike by sender and receivers.
+      Uint8List binding(String messageId) =>
+          sha256(Uint8List.fromList(utf8.encode('$groupId|$messageId')));
 
-      aliceMgr.processSenderKey(bobSkdm);
-      charlieMgr.processSenderKey(bobSkdm);
-
-      aliceMgr.processSenderKey(charlieSkdm);
-      bobMgr.processSenderKey(charlieSkdm);
-
-      // Alice sends
-      final aliceMsg = aliceMgr.encryptGroupMessage(
-        groupId,
-        'alice',
-        Uint8List.fromList(utf8.encode('Hello from Alice')),
-      );
-      expect(
-        utf8.decode(
-            bobMgr.decryptGroupMessage(groupId, 'alice', aliceMsg)),
-        'Hello from Alice',
-      );
-      expect(
-        utf8.decode(
-            charlieMgr.decryptGroupMessage(groupId, 'alice', aliceMsg)),
-        'Hello from Alice',
-      );
-
-      // Bob sends
-      final bobMsg = bobMgr.encryptGroupMessage(
-        groupId,
-        'bob',
-        Uint8List.fromList(utf8.encode('Hello from Bob')),
-      );
-      expect(
-        utf8.decode(
-            aliceMgr.decryptGroupMessage(groupId, 'bob', bobMsg)),
-        'Hello from Bob',
-      );
-      expect(
-        utf8.decode(
-            charlieMgr.decryptGroupMessage(groupId, 'bob', bobMsg)),
-        'Hello from Bob',
-      );
-
-      // Charlie sends
-      final charlieMsg = charlieMgr.encryptGroupMessage(
-        groupId,
-        'charlie',
-        Uint8List.fromList(utf8.encode('Hello from Charlie')),
-      );
-      expect(
-        utf8.decode(
-            aliceMgr.decryptGroupMessage(groupId, 'charlie', charlieMsg)),
-        'Hello from Charlie',
-      );
-      expect(
-        utf8.decode(
-            bobMgr.decryptGroupMessage(groupId, 'charlie', charlieMsg)),
-        'Hello from Charlie',
-      );
-    });
-  });
-
-  group('Integration — group via SignalProtocolService', () {
-    test('group encrypt/decrypt via high-level API', () async {
-      final alice = SignalProtocolService(
-          identityStore: InMemoryVerifiedIdentityStore());
-      await alice.generateIdentityKeyPair();
-
-      final bob = SignalProtocolService(
-          identityStore: InMemoryVerifiedIdentityStore());
-      await bob.generateIdentityKeyPair();
-
-      const groupId = 'group-svc-1';
-
-      // Alice creates sender key
-      final aliceSKResult = await alice.createSenderKey(
-        groupId,
-        myId: 'alice',
-      );
-
-      // Bob processes Alice's sender key
-      await bob.processSenderKey(
-        groupId,
-        'alice',
-        aliceSKResult,
-      );
-
-      // Alice encrypts
-      final ciphertext = await alice.encryptGroupMessage(
-        groupId,
-        Uint8List.fromList(utf8.encode('Group hello!')),
-        myId: 'alice',
-      );
-
-      // Bob decrypts
-      final plaintext = await bob.decryptGroupMessage(
-        groupId,
-        'alice',
-        ciphertext,
-      );
-
-      expect(utf8.decode(plaintext), 'Group hello!');
+      for (final from in members) {
+        final id = 'msg-from-$from';
+        final ct = managers[from]!.encryptBoundGroupMessage(groupId, from,
+            Uint8List.fromList(utf8.encode('Hello from $from')), binding(id));
+        expect(ct[0], senderKeyWireV4);
+        for (final to in members.where((m) => m != from)) {
+          expect(
+            utf8.decode(managers[to]!
+                .decryptBoundGroupMessage(groupId, from, ct, binding(id))),
+            'Hello from $from',
+          );
+        }
+      }
     });
   });
 
   group('Integration — mixed 1:1 + group', () {
-    test('1:1 and group messaging coexist without interference', () async {
+    test('the Sender Key travels over the 1:1 session; 1:1 and group '
+        'messaging coexist', () async {
       final (aliceParty, bobParty) = await _boundPair();
       final alice = aliceParty.signal;
       final bob = bobParty.signal;
+      const groupId = 'mixed-group';
 
-      // -- 1:1 session --
+      // -- 1:1: Alice's key for the group, as a 72-byte body --
+      final aliceGroup = SenderKeyManager();
+      final skdm = aliceGroup.createSenderKey(groupId, aliceParty.peerId);
+      final enc = await alice.encryptMessage(
+        recipientId: bobParty.peerId,
+        deviceId: _devB,
+        plaintext: skdm.serialize(),
+      );
+      final body = await bob.decryptMessage(
+        senderId: aliceParty.peerId,
+        deviceId: _devA,
+        ciphertext: enc['ciphertext'] as Uint8List,
+        messageType: enc['messageType'] as int,
+        envelopeDeviceId: _devA,
+      );
+      // Bob names the sender from the authenticated 1:1 session, not from
+      // the bytes.
+      final bobGroup = SenderKeyManager();
+      expect(
+          bobGroup.processSenderKey(SenderKeyDistributionMessage.deserialize(
+              body,
+              groupId: groupId,
+              senderId: aliceParty.peerId)!),
+          isTrue);
+
+      // -- Group message --
+      final binding = sha256(Uint8List.fromList(utf8.encode(groupId)));
+      final groupCt = aliceGroup.encryptBoundGroupMessage(groupId,
+          aliceParty.peerId, Uint8List.fromList(utf8.encode('Group msg')), binding);
+      expect(
+          utf8.decode(bobGroup.decryptBoundGroupMessage(
+              groupId, aliceParty.peerId, groupCt, binding)),
+          'Group msg');
+
+      // -- 1:1 still works after the group message --
       final enc1to1 = await alice.encryptMessage(
         recipientId: bobParty.peerId,
         deviceId: _devB,
-        plaintext: Uint8List.fromList(utf8.encode('Private DM')),
+        plaintext: Uint8List.fromList(utf8.encode('Still private')),
       );
       final dec1to1 = await bob.decryptMessage(
         senderId: aliceParty.peerId,
         deviceId: _devA,
         ciphertext: enc1to1['ciphertext'] as Uint8List,
         messageType: enc1to1['messageType'] as int,
-        envelopeDeviceId: _devA,
       );
-      expect(utf8.decode(dec1to1), 'Private DM');
-
-      // -- Group messaging (same users) --
-      const groupId = 'mixed-group';
-      final aliceSK = await alice.createSenderKey(groupId, myId: 'alice');
-      await bob.processSenderKey(groupId, 'alice', aliceSK);
-
-      final groupCt = await alice.encryptGroupMessage(
-        groupId,
-        Uint8List.fromList(utf8.encode('Group msg')),
-        myId: 'alice',
-      );
-      final groupPt = await bob.decryptGroupMessage(
-        groupId,
-        'alice',
-        groupCt,
-      );
-      expect(utf8.decode(groupPt), 'Group msg');
-
-      // -- Verify 1:1 still works after group --
-      final enc1to1b = await alice.encryptMessage(
-        recipientId: bobParty.peerId,
-        deviceId: _devB,
-        plaintext: Uint8List.fromList(utf8.encode('Still private')),
-      );
-      final dec1to1b = await bob.decryptMessage(
-        senderId: aliceParty.peerId,
-        deviceId: _devA,
-        ciphertext: enc1to1b['ciphertext'] as Uint8List,
-        messageType: enc1to1b['messageType'] as int,
-      );
-      expect(utf8.decode(dec1to1b), 'Still private');
+      expect(utf8.decode(dec1to1), 'Still private');
     });
   });
 

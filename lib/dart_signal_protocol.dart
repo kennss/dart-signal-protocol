@@ -6,14 +6,15 @@
 /// @company     Calida Lab
 /// @created     2026-04-07
 /// @lastUpdated 2026-11-23 (ed25519_strict and sealed_plaintext exports; identity_pin_store and
-///              identity_key_changed_exception removed with the legacy TOFU model). Earlier 2026-11-10 (Identity Binding v1 exports: binding, admission, verified identity store, Safety Number)
+///              identity_key_changed_exception removed with the legacy TOFU model;
+///              message_send_log and sender_key_tracker removed with the v1 group machinery). Earlier 2026-11-10 (Identity Binding v1 exports: binding, admission, verified identity store, Safety Number)
 
 library dart_signal_protocol;
 
 // Exports are kept in alphabetical order (directives_ordering). Areas:
 //  - primitives:      ed25519_strict, hkdf, x25519
 //  - 1:1 messaging:   double_ratchet, prekey_bundle, x3dh
-//  - group messaging: message_send_log, sender_key, sender_key_tracker
+//  - group messaging: sender_key (wire format v4)
 //  - files:           file_encryptor
 //  - Sealed Sender:   sealed_plaintext, sealed_sender, sender_certificate
 //  - identity:        identity_admission, identity_binding,
@@ -29,14 +30,12 @@ export 'src/identity_admission.dart';
 export 'src/identity_binding.dart';
 export 'src/identity_binding_exception.dart';
 export 'src/logger.dart' show setSignalProtocolLogger;
-export 'src/message_send_log.dart';
 export 'src/prekey_bundle.dart';
 export 'src/safety_number.dart';
 export 'src/sealed_plaintext.dart';
 export 'src/sealed_sender.dart';
 export 'src/sender_certificate.dart';
 export 'src/sender_key.dart';
-export 'src/sender_key_tracker.dart';
 export 'src/signal_protocol_service.dart';
 export 'src/verified_identity_store.dart';
 export 'src/x25519.dart';

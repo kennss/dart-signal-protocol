@@ -1,11 +1,11 @@
 /// @file        signal_protocol_service_test.dart
-/// @description Regression tests for SignalProtocolService behavior backported from SnowChat in 0.3.0: persistent PreKey (receive-first bootstrap), type-2 archive fallback, one-time prekey fail-loud, X3DH 4DH/5DH domain separation, sealed messageType recovery + Sealed Sender Step 9, signed-prekey self-heal accessors, atomic saveSessionStore, MessageSendLog aliases
+/// @description Regression tests for SignalProtocolService behavior backported from SnowChat in 0.3.0: persistent PreKey (receive-first bootstrap), type-2 archive fallback, one-time prekey fail-loud, X3DH 4DH/5DH domain separation, sealed messageType recovery + Sealed Sender Step 9, signed-prekey self-heal accessors, atomic saveSessionStore
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
 /// @lastUpdated 2026-11-23 (bindings mandatory: every peer is a bound TestParty — the sender is
 ///              verified from the binding embedded in its PreKey messages, not from a server-supplied
-///              Ed25519 key). Earlier 2026-11-10
+///              Ed25519 key; no MessageSendLog — removed). Earlier 2026-11-10
 ///
 /// @functions
 ///  - _peer(): A bound TestParty (account key + Signal identity + store) with its binding installed
@@ -17,7 +17,7 @@
 ///  - resolveSealedMessageType: prekey/normal detection, Step 9 mismatch, malformed input, full seal->unseal->decrypt flow
 ///  - SPK self-heal accessors: signedPreKeyPublicKey / hasAnySignedPreKey
 ///  - saveSessionStore: returns false without key, true + atomic (no temp leftovers) with key
-///  - MessageSendLog.addAlias: lookup by alias, no-op cases
+///  - pre-0.4.0 stores: senderKeys / messageSendLog ignored on load, dropped on save
 library;
 
 import 'dart:convert';
@@ -26,6 +26,7 @@ import 'dart:typed_data';
 
 import 'package:dart_signal_protocol/dart_signal_protocol.dart';
 import 'package:pinenacl/ed25519.dart' as ed;
+import 'package:pinenacl/x25519.dart' as nacl_api;
 import 'package:test/test.dart';
 
 import 'identity_test_support.dart';
@@ -399,24 +400,43 @@ void main() {
     });
   });
 
-  group('MessageSendLog.addAlias', () {
-    test('alias resolves to the same entry', () {
-      final log = MessageSendLog();
-      final pt = Uint8List.fromList(utf8.encode('payload'));
-      log.record('client-1', pt, conversationId: 'conv-1');
-      log.addAlias('client-1', 'server-1');
-      expect(log.lookup('server-1'), pt);
-      expect(log.conversationIdFor('server-1'), 'conv-1');
-      expect(log.isGroupMessage('server-1'), isFalse);
-    });
+  group('pre-0.4.0 session stores', () {
+    test('senderKeys / messageSendLog are ignored on load and dropped on the '
+        'next save', () async {
+      final dir = await Directory.systemTemp.createTemp('dsp_v03_');
+      addTearDown(() => dir.delete(recursive: true));
+      final key = Uint8List.fromList(List.generate(32, (i) => i + 1));
+      final path = '${dir.path}/store.bin';
+      final (alice, bob) = await _aliceBob();
+      await _connect(alice, bob);
+      alice.signal.setStoreEncryptionKey(key);
+      expect(await alice.signal.saveSessionStore(path), isTrue);
 
-    test('no-op for unknown primary or identical ids', () {
-      final log = MessageSendLog();
-      log.addAlias('missing', 'server-x');
-      expect(log.lookup('server-x'), isNull);
-      log.record('same', Uint8List.fromList([1]), conversationId: 'c');
-      log.addAlias('same', 'same');
-      expect(log.lookup('same'), [1]);
+      Map<String, dynamic> read() {
+        final raw = File(path).readAsBytesSync();
+        return jsonDecode(utf8.decode(nacl_api.SecretBox(key).decrypt(
+            nacl_api.EncryptedMessage(
+                nonce: raw.sublist(0, 24),
+                cipherText: raw.sublist(24))))) as Map<String, dynamic>;
+      }
+
+      // What a 0.3.x build wrote next to the sessions.
+      final store = read()
+        ..['senderKeys'] = {'g:alice': <String, dynamic>{'states': <Object>[]}}
+        ..['messageSendLog'] = {'entries': <Object>[]};
+      File(path).writeAsBytesSync(nacl_api.SecretBox(key)
+          .encrypt(Uint8List.fromList(utf8.encode(jsonEncode(store))),
+              nonce: Uint8List(24))
+          .toList());
+
+      final restored = SignalProtocolService(identityStore: alice.store)
+        ..setStoreEncryptionKey(key);
+      await restored.loadSessionStore(path);
+      expect(await restored.hasSession(bob.peerId, _devB), isTrue);
+      expect(await restored.saveSessionStore(path), isTrue);
+      final after = read();
+      expect(after.containsKey('senderKeys'), isFalse);
+      expect(after.containsKey('messageSendLog'), isFalse);
     });
   });
 }
