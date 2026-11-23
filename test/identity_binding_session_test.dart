@@ -13,7 +13,7 @@
 ///              transient lookup failure), device selection + non-consuming
 ///              directory admission, key-change notice rules, bound-session
 ///              purge (active + archived, and sessions without a stored remote
-///              IK) and remoteIdentityKey persistence, archiveSessionsOf, and
+///              IK) and remoteIdentityKey persistence, and
 ///              Safety Number v2 symmetry + cross-implementation golden.
 /// @author      Kennt Kim
 /// @company     Calida Lab
@@ -21,7 +21,7 @@
 /// @lastUpdated 2026-11-23 (backport SnowChat 3df0cc5 / 0aa549b: bindings always mandatory —
 ///              the legacy TOFU cases became refusals; promotionNotice -> keyChangeNotice; no
 ///              store-less backward-compatibility group; sessions without a remote IK are purged;
-///              archiveSessionsOf). Earlier 2026-11-10
+///              archiveSessionsOf is covered by session_archive_test). Earlier 2026-11-10
 ///
 /// @functions
 ///  - main(): session-level identity binding tests
@@ -889,31 +889,6 @@ void main() {
       await reloaded.loadSessionStore(path);
       expect(await reloaded.hasSession(bob.peerId, _devB), isFalse);
       expect(reloaded.archiveDecryptDirty, isTrue);
-    });
-
-    test('archiveSessionsOf archives the sessions of one peer only',
-        () async {
-      final alice = await TestParty.create(seedByte: 1, deviceId: _devA);
-      final bob = await TestParty.create(seedByte: 2, deviceId: _devB);
-      final carol = await TestParty.create(seedByte: 3, deviceId: _devB);
-      await alice.signal.createSession(
-        recipientId: bob.peerId,
-        deviceId: _devB,
-        preKeyBundle: bob.bundle(
-            binding: bob.bindingFor(epoch: 1000),
-            accountPublicKey: bob.accountPub),
-      );
-      await alice.signal.createSession(
-        recipientId: carol.peerId,
-        deviceId: _devB,
-        preKeyBundle: carol.bundle(
-            binding: carol.bindingFor(epoch: 1000),
-            accountPublicKey: carol.accountPub),
-      );
-      expect(await alice.signal.archiveSessionsOf(bob.peerId), 1);
-      expect(await alice.signal.hasSession(bob.peerId, _devB), isFalse);
-      expect(await alice.signal.hasSession(carol.peerId, _devB), isTrue);
-      expect(await alice.signal.archiveSessionsOf(bob.peerId), 0);
     });
   });
 

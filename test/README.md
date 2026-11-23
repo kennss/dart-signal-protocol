@@ -28,6 +28,8 @@ Unit and integration tests for every module:
   record codec (unbound records keep only the account key)
 - `identity_binding_session_test.dart` — identity admission over real X3DH /
   Double Ratchet sessions, refusals, session purge, Safety Number v2
+- `session_archive_test.dart` — `archiveSessionsOf`: one peer's sessions put
+  aside, in-flight messages still open, other peers untouched
 - `identity_binding_mandatory_test.dart` — a peer without a binding is refused
   on both paths and leaves nothing behind
 - `identity_test_support.dart` — shared helpers (not a test file)

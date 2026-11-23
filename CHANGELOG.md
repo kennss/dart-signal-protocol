@@ -136,7 +136,7 @@ below before upgrading; upgrade all peers together.**
   `senderKeyDistributionLength`, `SenderKeyException`,
   `SenderKeyFailure`, `SenderKeyManager.fromJson()`.
 - Tests: `ed25519_strict_test`, `identity_binding_mandatory_test`,
-  `sealed_trusted_keys_test`, `sealed_sender_tamper_test`,
+  `session_archive_test`, `sealed_trusted_keys_test`, `sealed_sender_tamper_test`,
   `sealed_padding_test`, a rewritten `sender_key_test` (with a v4 golden
   vector computed by the SnowChat app's code), and new refusal /
   migration cases in the session, store and service tests.
