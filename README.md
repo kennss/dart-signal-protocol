@@ -1,6 +1,6 @@
 # dart_signal_protocol
 
-> **The most complete Pure Dart implementation of the Signal Protocol — X3DH, Double Ratchet, Sender Key, and Sealed Sender — with zero native dependencies.**
+> **A Pure Dart implementation of the Signal protocol family — X3DH, Double Ratchet, Sender Key and Sealed Sender — with one dependency and no native code.**
 
 [![Pub Version](https://img.shields.io/badge/pub-0.4.0-orange.svg)](#)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 
 `dart_signal_protocol` delivers the **full Signal Protocol stack in Pure Dart**: X3DH key agreement, Double Ratchet messaging, Sender Key group encryption, and **Sealed Sender** (sender anonymity). No Platform Channels, no native binaries, no JNI/Swift bridges — one codebase that runs identically on iOS, Android, Desktop, and Dart VM targets.
 
-This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@calidalab.ai)**, an E2EE messenger with 1:1 and group conversations. SnowChat has been running the hardened service-layer version of this code in production. The public package (`0.4.0`) contains the backport of those hardenings — most recently **mandatory Identity Binding v1** (account-signed Signal identities that a malicious server cannot substitute; peers without one are refused, no TOFU fallback), **strict Ed25519** for every signature that decides trust, **pinned Sealed Sender server keys** and the **Sender Key wire format v4** — plus documentation of the residual risks. Please read [`§ Known Risks Before You Use`](#known-risks-before-you-use) before adopting, and [`§ Migrating from 0.3.x`](#migrating-from-03x) if you are upgrading.
+This library is the extracted cryptographic core of **[SnowChat](https://snowchat.calidalab.ai)**, an end-to-end encrypted messenger whose server keeps no social graph. SnowChat has been running the hardened service-layer version of this code in production. The public package (`0.4.0`) contains the backport of those hardenings — most recently **mandatory Identity Binding v1** (account-signed Signal identities that a malicious server cannot substitute; peers without one are refused, no TOFU fallback), **strict Ed25519** for every signature that decides trust, **pinned Sealed Sender server keys** and the **Sender Key wire format v4** — plus documentation of the residual risks. Please read [`§ Known Risks Before You Use`](#known-risks-before-you-use) before adopting, and [`§ Migrating from 0.3.x`](#migrating-from-03x) if you are upgrading.
 
 **One dependency. ~6,900 lines (with doc comments). Full Signal Protocol.**
 
@@ -26,7 +26,7 @@ This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@ca
 
 ### What this means in plain language
 
-- ✅ The cryptographic primitives (X25519 DH, Ed25519, HKDF, XSalsa20-Poly1305) are sound and audited. Every signature that decides trust is verified with **strict Ed25519** (`verifyEd25519Strict`: canonical scalar S < L, no small-order or non-canonical keys) — plain TweetNaCl verification accepts both.
+- ✅ The cryptographic primitives (X25519 DH, Ed25519, XSalsa20-Poly1305) come from `pinenacl`, a Pure Dart port of TweetNaCl; HKDF is implemented here over HMAC-SHA256. Every signature that decides trust is verified with **strict Ed25519** (`verifyEd25519Strict`: canonical scalar S < L, no small-order or non-canonical keys) — plain TweetNaCl verification accepts both.
 - ✅ X3DH, Double Ratchet, Sender Key, and Sealed Sender have been internally reviewed end-to-end.
 - ⚠️ The **service layer** (`SignalProtocolService`) is what was battle-tested inside SnowChat. The lower-level classes (`DoubleRatchetSession`, `SenderKeyManager`, `SealedSenderService`) have known caller-responsibility contracts — see [`§ Known Risks`](#known-risks-before-you-use).
 - ⚠️ **No external third-party audit** has been conducted. Do not deploy to high-stakes adversaries without additional review.
@@ -147,11 +147,11 @@ Every other path to Signal Protocol in Flutter is painful:
 |----------|---------|
 | Platform Channels + libsignal (Rust/C) | JNI for Android, Swift bridge for iOS, no Flutter Web |
 | FFI wrapper (e.g., `libsignal_dart`) | Requires Rust toolchain per platform, heavy builds |
-| `libsignal_protocol_dart` (MixinNetwork) | No Sealed Sender, inactive since 2025 |
+| `libsignal_protocol_dart` (MixinNetwork) | No Sealed Sender |
 | Roll your own | Months of work, high risk of cryptographic bugs |
 | Weaker E2EE scheme | No forward secrecy, no post-compromise security |
 
-**`dart_signal_protocol` is the only option that gives you the full Signal Protocol stack — including Sealed Sender — in Pure Dart, with one dependency.**
+**`dart_signal_protocol` gives you X3DH, Double Ratchet, Sender Key and Sealed Sender in Pure Dart with one dependency** — at the price of an independent wire format and no external audit yet (see below).
 
 ---
 
@@ -428,8 +428,7 @@ The original SnowChat project provides storage, networking, identity-store and g
 |---|---|---|
 | **Language** | Pure Dart | Rust + bindings |
 | **Native dependencies** | None | JNI / Swift / Node bindings |
-| **Flutter Web support** | ❌ (see §4) | ❌ |
-| **Lines of code** | ~8,000 | ~80,000 |
+| **Size** | ~6,900 lines of Dart (with doc comments) | A much larger Rust code base |
 | **External audit** | ❌ | ✅ multiple |
 | **Production users (direct consumption)** | 0 (alpha) | ~2 billion (via Signal) |
 | **Sealed Sender** | ✅ | ✅ |
@@ -517,8 +516,8 @@ There is no fixed timeline. Progress depends on community interest and contribut
 
 ## About SnowChat
 
-SnowChat is an E2EE messenger + Solana wallet built by [Calida Lab](mailto:kennt@calidalab.ai). Its messaging protocols (X3DH, Double Ratchet, Sender Key, Sealed Sender) are this Pure Dart code; its group membership uses libsignal's zkgroup, which is not part of this library.
+[SnowChat](https://snowchat.calidalab.ai) is an end-to-end encrypted messenger built by Calida Lab: no phone number, a server that keeps no social graph (friend lists stay on the phone, group membership is hidden), and a server you can run yourself. Its messaging protocols (X3DH, Double Ratchet, Sender Key, Sealed Sender) are this Pure Dart code; its group membership uses libsignal's zkgroup, which is not part of this library.
 
-This library is the extracted cryptographic core. SnowChat adds the application layer: Flutter UI, drift persistence, Socket.IO transport, and Solana wallet integration. Where this library's caller-responsibility contracts require storage-layer decisions (replay dedup, identity store, session-store encryption), SnowChat's application layer supplies them.
+This library is the extracted cryptographic core. SnowChat adds the application layer: Flutter UI, encrypted drift persistence, Socket.IO transport, group protocol v2 and the on-device contact list. Where this library's caller-responsibility contracts require storage-layer decisions (replay dedup, identity store, session-store encryption), SnowChat's application layer supplies them.
 
 For inquiries: kennt@calidalab.ai
