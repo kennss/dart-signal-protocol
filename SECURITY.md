@@ -27,6 +27,7 @@ All audits to date have been **internal**. No external third-party firm audit ha
 
 | Date | Scope | Performed by | Result |
 |------|-------|--------------|--------|
+| 2026-11-23 | 0.4.0 backport review (library vs. the SnowChat reference after 2026-11-10) | Internal (AI-assisted) | Found that the signed-prekey signature, the sender certificate and Sender Key messages were verified with plain TweetNaCl (accepting S ≥ L and small-order keys) while the reference refuses both — fixed with `verifyEd25519Strict`. Backported: mandatory bindings (TOFU first-contact substitution closed), pinned Sealed Sender keys (SnowChat SC-06), Sender Key v4 (context binding, signed header, one read per key), removal of the plaintext retry log. |
 | 2026-11-10 | Identity Binding v1 (design + implementation review, SnowChat B-2) | Internal (AI-assisted, multi-pass) | Server key-substitution (SC-02) closed for bound peers; review findings (signing-oracle prefix, canonical S, small-order account keys, epoch floor, legacy-Ed weakness, notice-once, non-consuming pre-admission, strict parsing) resolved before release. |
 | 2026-04-22 | Full protocol + service layer (Claude Opus 4.7 reconnaissance pass) | Internal (AI-assisted) | C-1, H-1, H-2, M-3, M-4 — resolved at service layer in v0.2.0-alpha.1 backport. C-2 documented as open limitation. |
 | 2026-04 | Sealed Sender 6-stage review (design → code → critical audit → verification → fix → trace) | Internal | Resolved within scope (P0: 1, P1: 5). Replay-cache persistence carried forward as known limitation. |
@@ -45,15 +46,19 @@ These MUST hold at all times. Violations are security bugs:
 2. **No HSalsa20 on DH**: Uses `TweetNaCl.crypto_scalarmult()` directly, NOT `Box.sharedKey()`.
 3. **Ephemeral keys zeroed after use**: Sealed Sender `ek_seal` zeroed in `finally` block.
 4. **DH shared secrets zeroed after HKDF**: `dhResult.fillRange(0, len, 0x00)` after key derivation.
-5. **HKDF domain separation**: Each protocol uses unique info strings (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_SealedSender_v1`).
+5. **Domain separation**: Each protocol uses unique info strings / signature labels (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_SealedSender_v1`, `0xFF ‖ SnowChat_IdentityBinding_v1`, `0xFE ‖ SnowChat_GV2_Msg_v1`).
 6. **Certificate verified before inner payload processed**: Sealed Sender unseal rejects forged certificates before DR decrypt.
 7. **Replay protection (in-memory)**: `EK_seal` dedup cache (10K entries) checked before DH computation.
-8. **Fail-closed on missing sender Ed25519 verify key**: `createSession` always, and `_receiveSession` in legacy mode (no `identityStore`), refuse session establishment rather than install an unverified session.
+8. **Fail-closed on a missing or bad signed-prekey signature**: `createSession` refuses a bundle without the Ed25519 identity key or whose signed prekey does not verify (strictly), before identity admission or X3DH.
 9. **Plaintext session-store fallback refused**: `saveSessionStore` skips the write if no encryption key is installed (rather than write identity + ratchet material in the clear).
-10. **Identity admission before key material is used** (with an `identityStore`): bundles are admitted before X3DH; PreKey messages are admitted before any signed / one-time prekey is read or consumed.
+10. **Identity admission before key material is used, always**: an identity store is required; bundles are admitted before X3DH; PreKey messages are admitted before any signed / one-time prekey is read or consumed. A peer without a valid binding is refused (`bindingRequired` / `downgrade`) and nothing is recorded for it — there is no TOFU path.
 11. **Binding verification is fail-closed and never throws**: account key 32 B, canonical, not small-order; account key derives the peer id (constant time); canonical signature scalar (S < L); lowercase-UUID device id; 0xFF-prefixed fixed-length message, so no UTF-8 string signer can produce a valid binding.
 12. **Latch never decreases and survives `remove()`**: a peer that once proved a binding can never be accepted unbound again; an epoch below the latch (or the same epoch for different keys) is rejected.
-13. **Bound sessions only**: sessions (active and archived) whose recorded remote identity key differs from a bound peer's key are purged before encrypt / decrypt and never used.
+13. **Bound sessions only**: sessions (active and archived) whose recorded remote identity key differs from a bound peer's key — or that recorded none — are purged before encrypt / decrypt and never used.
+14. **Strict Ed25519 for every trust decision**: identity bindings, signed prekeys, sender certificates and Sender Key messages are verified with a canonical scalar (S < L) under a canonical, non-small-order key (`verifyEd25519Strict`). Plain `VerifyKey.verify` is never used to decide trust.
+15. **Sealed Sender keys come from the build**: `SealedSenderService` verifies certificates only against the `trustedServerKeys` it was constructed with (non-empty, strict keys, copied); the library never accepts a key from the network.
+16. **Sender Key messages are bound and read once**: the v4 signature covers the caller's 32-byte binding, the version, chain id and iteration, and the ciphertext; a message key is dropped once it has read its message; a failed read changes no stored key.
+17. **No plaintext at rest in the session store**: the store holds key material and ratchet state only (the 0.3.x retry log of sent plaintexts is removed).
 
 ---
 
@@ -93,34 +98,38 @@ try {
 | Inner payload | Outcome of replay attempt |
 |---|---|
 | **Double Ratchet ciphertext** — new message after original was consumed | DR layer rejects (trial-decrypt rollback if `SignalProtocolService` is used). No user-visible impact. |
-| **Sender Key group ciphertext** — original message was consumed | `cachedMessageKeys` returns the stored key (kept for drift-retry safety). **`decrypt()` returns plaintext.** Caller-level deduplication is required. |
+| **Sender Key group ciphertext** (v4, since 0.4.0) — original message was consumed | The message key was dropped when it read the original: the replay fails as `SenderKeyFailure.expired` — provided the caller persisted the `SenderKeyManager` records with the plaintext. (0.3.x kept the key and returned the plaintext again.) |
 | **VoIP / application signalling** | Application state machine typically rejects stale signalling; caller-specific. |
 
-**Mitigation.** The caller must deduplicate on a stable content identifier that survives process restart. Recommended: a unique index on `(sender_id, sent_timestamp, conversation_id)` in durable storage. `sender_id` comes from the Sealed Sender certificate (server-signed, tamper-proof); `sent_timestamp` comes from the inner plaintext; both are stable under replay.
+**Mitigation.** The caller should still deduplicate on a stable content identifier that survives process restart. Recommended: a unique index on `(sender_id, sent_timestamp, conversation_id)` in durable storage. `sender_id` comes from the Sealed Sender certificate (server-signed, tamper-proof); `sent_timestamp` comes from the inner plaintext; both are stable under replay.
 
 **Status.** Not fixed in this release. Tracked as roadmap item "Persistent Sealed Sender replay cache".
 
-### M-3 — Identity verification is opt-in; legacy peers remain TOFU
+### M-3 — Identity Binding v1 depends on the account key and on the caller's latch persistence
 
-**Description.** `SignalProtocolService` verifies peer identities only when constructed with an `identityStore` (Identity Binding v1). Without it, any identity key the server presents is accepted (or, with the **deprecated** `IdentityPinStore`, accepted on first contact and after every reinstall). Even with an `identityStore`, a peer that has never published a binding is handled with Signal-style TOFU: a hostile server can substitute such a peer's keys on first contact, and a later change is only *announced* (`legacyKeyChanged`) — blocked only if the user had marked the peer verified.
-
-**What Identity Binding v1 does and does not cover.**
+**Description.** Since 0.4.0 identity bindings are mandatory: `SignalProtocolService` requires a `VerifiedIdentityStore`, and a peer that presents no valid account-signed binding is refused (`bindingRequired`, or `downgrade` once latched) — the 0.3.x TOFU path for binding-less peers, through which a hostile server could substitute a never-bound peer's keys on first contact, is gone. What remains depends on things the library cannot see.
 
 | Threat | Covered? |
 |---|---|
-| Server substitutes a bound peer's bundle (send side) | ✅ `signatureInvalid` / `accountKeyMismatch` |
+| Server substitutes a peer's bundle (send side) | ✅ `signatureInvalid` / `accountKeyMismatch` |
 | Server swaps the X3DH header identity key of a PreKey message | ✅ signature is verified over the header key, before prekeys are touched |
-| Server strips the binding of a peer that proved one (downgrade) | ✅ `downgrade` (latch) |
+| Server strips a peer's binding (first contact or later) | ✅ `bindingRequired` / `downgrade` |
 | Server replays an older, validly signed binding | ✅ `epochRegression` |
-| Server substitutes a never-bound (legacy) peer on first contact | ❌ TOFU — mitigate with `pinFromInviteLink()` (out-of-band account key) |
+| Server hands out a peer id whose account key it controls (wrong id) | ❌ the id is the trust root — verify it out of band (`pinAccountKey`, Safety Numbers) |
 | Account-key compromise (leaked recovery phrase) | ❌ an attacker can sign new bindings; surfaced only as a `deviceKeysChanged` notice |
-| Integrator persists the latch unreliably | ❌ the downgrade window re-opens — the latch MUST be persisted durably |
+| Integrator persists the latch unreliably | ❌ the downgrade check for a known peer degrades to `bindingRequired` only — still refused, but an older binding could be replayed; the latch MUST be persisted durably |
 
 **Mitigation.** Inject a persistent `VerifiedIdentityStore` subclass, derive peer ids from account keys (`IdentityIdScheme`), upload bindings, pass `envelopeDeviceId` / `identityDirectoryLookup` on receive, treat `IdentityBindingInvalidException` as terminal, and show Safety Numbers over account keys (`SafetyNumber.forAccountKeys`). README `§ Known Risks #3` lists every caller obligation.
 
-**Divergence from the SnowChat app.** The library's `isPeerVerified` errors propagate (the admission fails transiently) instead of being treated as "not verified", so a storage error can never silently accept a verified peer's key change.
+**Status.** Identity Binding v1 shipped in 0.3.0-alpha.1 and is mandatory since 0.4.0 (`IdentityPinStore` removed).
 
-**Status.** Identity Binding v1 shipped in 0.3.0-alpha.1. `IdentityPinStore` is deprecated and kept only for backward compatibility; passing both stores throws.
+### M-4 — Sealed Sender trusts the keys the caller pins
+
+**Description.** A sender certificate proves the sender's identity only as far as the server key that signed it is trusted. `SealedSenderService(trustedServerKeys: …)` accepts any listed key. If an application fetched the key from its server at run time, a compromised server could sign certificates for any account.
+
+**Mitigation.** Pin the keys in the application build; rotate by shipping the next key in the list before switching the server (README `§ Known Risks #3a`).
+
+**Status.** Enforced by API shape since 0.4.0 (no key-fetch path in the library); the pinning itself is the caller's.
 
 ### A-2 — `SignalProtocolService` imports `dart:io`; Flutter Web builds fail
 
@@ -132,7 +141,7 @@ try {
 
 ### A-1 — HKDF `info` labels hardcoded to `SnowChat_*`
 
-**Description.** Domain-separation labels are constants (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_MsgKey`, `SnowChat_SealedSender_v1`, and the Identity Binding v1 format label `SnowChat_IdentityBinding_v1`). Products using this library as their cryptographic core inherit SnowChat's domain separation. The binding label is part of the fixed 172-byte v1 format shared with the SnowChat golden vectors; a dedicated account key per product keeps bindings from different products apart.
+**Description.** Domain-separation labels are constants (`SnowChat_X3DH_4DH` / `SnowChat_X3DH_5DH`, `SnowChat_Ratchet`, `SnowChat_SealedSender_v1`, the Identity Binding v1 format label `SnowChat_IdentityBinding_v1` and the Sender Key v4 signature label `SnowChat_GV2_Msg_v1`). Products using this library as their cryptographic core inherit SnowChat's domain separation. The binding label is part of the fixed 172-byte v1 format shared with the SnowChat golden vectors; a dedicated account key per product keeps bindings from different products apart.
 
 **Impact.** Not a security weakening; domain separation is still effective. Non-interoperable with forks that alter these labels.
 
@@ -152,9 +161,10 @@ try {
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.x | Yes — current |
-| 0.2.x | Security fixes only (cannot establish new sessions with 0.3.x — X3DH info change) |
-| 0.1.x | Security fixes only |
+| 0.4.x | Yes — current |
+| 0.3.x | Security fixes only (not interoperable with 0.4.x for groups — Sender Key v4 — and refused by 0.4.x peers when it publishes no binding) |
+| 0.2.x | No (cannot establish new sessions with 0.3.x+ — X3DH info change) |
+| 0.1.x | No |
 | < 0.1 | No |
 
 ---

@@ -5,6 +5,223 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-23
+
+Third backport from the reference SnowChat deployment, covering what the
+app's copy of the crypto code gained between 2026-11-10 and 2026-11-23
+(SnowChat commits `3df0cc5`, `0aa549b`, `966a884`, `f137f43`, `7a882d0`,
+`53c4560` and the Sealed Sender changes of 2026-11-22). It closes the
+remaining paths by which a malicious server could get its own keys
+accepted, makes every trust-deciding signature strict, and replaces the
+v1 group machinery with the Sender Key wire format v4.
+
+**This release is wire- and API-breaking. Read "Migration from 0.3.x"
+below before upgrading; upgrade all peers together.**
+
+### Security
+
+- **Strict Ed25519 for every trust-deciding signature.** 0.3.0 verified
+  Identity Binding v1 signatures strictly (canonical scalar S < L,
+  small-order and non-canonical account keys refused), but the
+  signed-prekey signature (`PreKeyBundle.verifySignature`, used by
+  `createSession`), the Sealed Sender certificate
+  (`SenderCertificate.verify`) and Sender Key messages used pinenacl's
+  plain TweetNaCl `VerifyKey.verify`. That accepts a second, malleated
+  signature (S + L) for any signed message and, for a small-order public
+  key, a single forged signature (R = identity, S = 0) that verifies for
+  every message. The SnowChat reference refuses both (`verifyEd25519Strict`
+  on its server, `ed25519_strict.dart` in its app), so a signature one
+  side accepted and the other refused could split their views. All three
+  checks now use the new `verifyEd25519Strict`; `SealedSenderService`
+  refuses a non-strict trusted key and `processSenderKey` refuses a
+  non-strict signing key. Honest peers are unaffected: TweetNaCl always
+  produces reduced signatures and random keys are never of small order.
+  Tests show each input accepted by plain TweetNaCl and refused by the
+  library.
+- **Identity bindings are mandatory** (SnowChat `3df0cc5`, `0aa549b`).
+  In 0.3.x a peer that presented no binding was admitted under a
+  Signal-style TOFU policy, so a compromised server could strip the
+  binding of a peer this device had never seen bound and substitute its
+  own keys on first contact; without an `identityStore` there were no
+  identity checks at all. Now every admission point (send-side bundle,
+  receive-side PreKey message, directory pre-admission) refuses a peer
+  without a valid binding — `IdentityBindingFailure.bindingRequired`, or
+  `downgrade` for a latched peer — and records nothing for it.
+- **Unproven 0.3.x identity records are not trusted.** An unbound record
+  read from a `VerifiedIdentityStore` keeps only its account key; keys a
+  0.3.x store recorded under TOFU (and its `edLegacy` / `pending*`
+  fields) are dropped. Sessions persisted without a remote identity key
+  (before 0.3.0) never match a bound identity and are purged; 0.3.0's
+  inference that labelled such sessions and kept them is gone.
+- **Sealed Sender server keys must be pinned** (SnowChat SC-06).
+  `SealedSenderService` takes `trustedServerKeys`, meant to be pinned in
+  the application build and never fetched from the server at run time —
+  a server that can hand out its own key can sign a sender certificate
+  for any account and impersonate any sender.
+- **Sender Key messages are bound to their context and read once**
+  (wire format v4). The signature covers a caller-supplied 32-byte
+  binding plus the message's own chain id and iteration, so a member or
+  the server cannot re-wrap a message under another header or push a
+  receiver's chain forward with a forged iteration; a message key reads
+  one message, so a replayed group message fails (`expired`) instead of
+  returning plaintext again (this closes the Sender Key row of the
+  in-memory replay-cache residual risk C-2).
+- **No message plaintexts at rest in the session store.** The removed
+  `MessageSendLog` kept sent plaintexts for 24 hours inside the session
+  store to answer retry requests.
+- **`SenderCertificate.toString` names no account or device** (SnowChat
+  `logRef`): a certificate printed into a log no longer reveals the
+  sender Sealed Sender hides.
+
+### Breaking
+
+- **`SignalProtocolService({required VerifiedIdentityStore identityStore})`.**
+  The store is required; `identityPinStore:` and the unused
+  `useMockFallback:` parameters are gone; `identityStore` is non-null.
+- **`createSession` refuses a bundle without a binding** and
+  **`decryptMessage` refuses a binding-less PreKey message** unless the
+  `identityDirectoryLookup` returns a server-held binding for the header
+  identity key — `IdentityBindingInvalidException(bindingRequired)`.
+  `decryptMessage(senderIdentityKeyEd25519:)` is removed.
+- **Identity API.** `IdentityAdmission.admitUnbound()` →
+  `refuseUnbound()` (returns the exception to throw);
+  `promotionNotice()` → `keyChangeNotice()` (bool, bound records only);
+  `AdmittedIdentity` is `{identityKey, ed25519}` (no `bound`,
+  `boundIdentityKey`, `boundDeviceId`).
+  `VerifiedIdentityStore.pinFromInviteLink()` → `pinAccountKey()`;
+  `rememberAccountKey()` only fills a missing record. The abstract store
+  no longer has `readMetadata` / `writeMetadata` / `isPeerVerified`;
+  `IdentityEventKind` is `{deviceKeysChanged, bindingRejected}`;
+  `IdentityBindingFailure` gains `bindingRequired`.
+- **Sealed Sender.** `SealedSenderService(serverVerifyKey:)` →
+  `SealedSenderService(trustedServerKeys: [...])` (non-empty, strict
+  Ed25519 keys, copied). `SenderCertificate.verify(Uint8List)` →
+  `verify(List<Uint8List>)`.
+- **Sender Key wire format v4** (wire-breaking: 0.3.x and 0.4.0 members
+  cannot read each other's group messages or distribution messages).
+  - `encryptGroupMessage` / `decryptGroupMessage` →
+    `encryptBoundGroupMessage` / `decryptBoundGroupMessage`, which take a
+    32-byte `binding` and throw `SenderKeyException(SenderKeyFailure)`.
+  - `SenderKeyDistributionMessage.serialize()` is a fixed 72-byte body
+    (chainId ‖ iteration ‖ chainKey ‖ signingKey, the SnowChat body);
+    `deserialize(bytes, groupId:, senderId:)` takes the group and sender
+    from the caller's authenticated context and returns `null` on a
+    malformed body. The JSON form is gone.
+  - `processSenderKey` returns `bool`; a chain already held is never
+    replaced.
+  - `SignalProtocolService` no longer exposes `createSenderKey`,
+    `processSenderKey`, `encryptGroupMessage`, `decryptGroupMessage`,
+    `senderKeyManager`, `skdmTracker` or `messageSendLog`. Use a
+    `SenderKeyManager` directly and persist `toJson()` yourself; the
+    session store no longer writes `senderKeys` (ignored on load, dropped
+    on the next save).
+
+### Added
+
+- `verifyEd25519Strict()` and `isAcceptableEd25519PublicKey()`
+  (`ed25519_strict.dart`).
+- `encodeSealedPlaintext()` / `sealedPlaintextBlock`
+  (`sealed_plaintext.dart`, SnowChat security review S4): opt-in padding
+  of a JSON message plaintext with JSON whitespace to a multiple of a
+  block (512 bytes by default) before Double Ratchet encryption, so
+  messages that fit one block travel in Sealed Sender envelopes of one
+  size (PreKey messages with their identity binding included). A plain
+  JSON decoder reads it back; byte-identical to the SnowChat app.
+- `SignalProtocolService.archiveSessionsOf(peerId)` — archive the
+  sessions with every device of a peer (the peer says its sessions are
+  gone and its current device is not known).
+- `IdentityBindingFailure.bindingRequired`.
+- Sender Key v4: `senderKeyWireV4`, `senderKeyBindingLength`,
+  `senderKeyMessageOverhead`, `senderKeyMessageLength()`,
+  `senderKeyDistributionLength`, `SenderKeyException`,
+  `SenderKeyFailure`, `SenderKeyManager.fromJson()`.
+- Tests: `ed25519_strict_test`, `identity_binding_mandatory_test`,
+  `sealed_trusted_keys_test`, `sealed_sender_tamper_test`,
+  `sealed_padding_test`, a rewritten `sender_key_test` (with a v4 golden
+  vector computed by the SnowChat app's code), and new refusal /
+  migration cases in the session, store and service tests.
+
+### Removed
+
+- **`IdentityPinStore`** (`identity_pin_store.dart`) and
+  **`IdentityKeyChangedException`** (`identity_key_changed_exception.dart`)
+  — the TOFU identity model, deprecated in 0.3.0, removed as in the
+  app (`0aa549b`). With bindings mandatory there is no unverified key to
+  pin and no "verified legacy peer changed keys" state to block on.
+- The legacy admission machinery: `admitUnbound`, pending key changes and
+  `acceptPendingChange`, `importLegacyPin`, `seedLegacyIdentityKeys`
+  (and the one-time IK seeding in `loadSessionStore`),
+  `remoteIdentityKeySnapshot()`, `edLegacySourced`, `isPeerVerified` /
+  `InMemoryVerifiedIdentityStore.verifiedLookup`, the
+  `legacyKeyChanged` / `legacyKeyChangeBlocked` / `interceptionSuspected`
+  events.
+- **`MessageSendLog`** (`message_send_log.dart`). Not a Signal-protocol
+  primitive: an application retry log that kept sent plaintexts for
+  24 hours inside the session store so a retry request could be answered
+  by re-encrypting them. Plaintext at rest is a liability, and whether
+  and how to resend is application policy (libsignal leaves it to the
+  app too). The reference app removed it with its retry path
+  (2026-11-22).
+- **`SenderKeyDistributionTracker`** (`sender_key_tracker.dart`). Not a
+  Signal-protocol primitive: bookkeeping of which members hold the
+  current Sender Key, i.e. application distribution policy. It was only
+  meaningful together with the v1 group design the app removed
+  (`f137f43`); who receives a key belongs to the application's
+  membership logic.
+- Sender Key v3 / v1 message formats, `rotateSenderKey()` and rotation
+  versions (call `createSenderKey()` again and distribute the result),
+  the origin-SKDM cache and `getExistingSKDM()`, `needsResave` and the
+  legacy record migrations, `maxGroupSize` (a group-size limit is
+  application policy).
+
+### Migration from 0.3.x
+
+1. **Identity.** Construct every `SignalProtocolService` with a
+   persistent `VerifiedIdentityStore` (records AND latches). Every peer
+   must publish an Identity Binding v1 (`IdentityBindingV1.sign` +
+   upload) before it can be reached or can reach you; peers that relied
+   on TOFU are now refused with `bindingRequired`. Remove
+   `senderIdentityKeyEd25519:` from `decryptMessage` calls and pass
+   `envelopeDeviceId` / `identityDirectoryLookup` instead. Rename
+   `pinFromInviteLink` → `pinAccountKey`; drop your `readMetadata` /
+   `writeMetadata` / `isPeerVerified` overrides and any handling of
+   `IdentityKeyChangedException`, `acceptPendingChange` and the removed
+   events. Existing 0.3.x records keep working: bound records are read
+   as before; unbound ones are read as account-key pins (their TOFU keys
+   are dropped).
+2. **Sealed Sender.** Pin your server's Sealed Sender verify key(s) in
+   the application build and pass them as
+   `SealedSenderService(trustedServerKeys: [...])`; never take the key
+   from a server response. Rotate by shipping the next key in the list
+   before switching the server.
+3. **Sender Key.** v4 is a wire break: upgrade every member, then have
+   each member call `createSenderKey()` and distribute the 72-byte
+   `serialize()` body over its 1:1 sessions; the receiver calls
+   `SenderKeyDistributionMessage.deserialize(bytes, groupId:, senderId:)`
+   with the group and the sender taken from the authenticated 1:1
+   context. Compute the same 32-byte `binding` on both sides (e.g.
+   `sha256(groupId ‖ messageId)` with the library's `sha256`). Persist
+   `SenderKeyManager.toJson()` yourself (encrypted); the group state that
+   0.3.x kept inside the session store is no longer loaded.
+4. **Retries.** If you used `messageSendLog` to answer retry requests,
+   keep any such log in your application (or, better, let the sender
+   re-send from its own outbox).
+5. **Sessions.** Sessions created by 0.3.x keep working. Sessions
+   persisted before 0.3.0 (no remote identity key) are purged the first
+   time the peer's bound sessions are enforced; the next send runs X3DH
+   again.
+
+### Not included
+
+- SnowChat group protocol v2 (signed membership log, zkgroup credentials,
+  the sealed group envelope), account-deletion proofs, the
+  `EncryptedMessageHandler` orchestration, contact notices, the vouching
+  marks of its `VerifiedIdentityStore` (`vouch` / `isVouched` — the
+  app's group-picker policy) and the app's pinned production / dev
+  Sealed Sender keys: application or SnowChat-specific. The v4 signature
+  label stays byte-identical to the app (`SnowChat_GV2_Msg_v1`, see the
+  hardcoded-labels risk) so the golden vector is shared.
+
 ## [0.3.0-alpha.1] - 2026-11-10
 
 Second backport from the reference SnowChat deployment. These fixes had been

@@ -2,15 +2,15 @@
 
 > **The most complete Pure Dart implementation of the Signal Protocol — X3DH, Double Ratchet, Sender Key, and Sealed Sender — with zero native dependencies.**
 
-[![Pub Version](https://img.shields.io/badge/pub-0.3.0--alpha.1-orange.svg)](#)
+[![Pub Version](https://img.shields.io/badge/pub-0.4.0-orange.svg)](#)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-iOS%20%7C%20Android%20%7C%20Desktop%20%7C%20Dart%20VM-blue.svg)](#)
 
 `dart_signal_protocol` delivers the **full Signal Protocol stack in Pure Dart**: X3DH key agreement, Double Ratchet messaging, Sender Key group encryption, and **Sealed Sender** (sender anonymity). No Platform Channels, no native binaries, no JNI/Swift bridges — one codebase that runs identically on iOS, Android, Desktop, and Dart VM targets.
 
-This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@calidalab.ai)**, an E2EE messenger with 1:1 and group conversations (up to 1024 members). SnowChat has been running the hardened service-layer version of this code in production. The public package (`0.3.0-alpha.1`) contains the backport of those hardenings (most recently **Identity Binding v1** — account-signed Signal identities that a malicious server cannot substitute — and the August 2026 receive-first / Sealed Sender first-contact fixes) plus documentation of the residual risks — please read [`§ Known Risks Before You Use`](#known-risks-before-you-use) before adopting.
+This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@calidalab.ai)**, an E2EE messenger with 1:1 and group conversations. SnowChat has been running the hardened service-layer version of this code in production. The public package (`0.4.0`) contains the backport of those hardenings — most recently **mandatory Identity Binding v1** (account-signed Signal identities that a malicious server cannot substitute; peers without one are refused, no TOFU fallback), **strict Ed25519** for every signature that decides trust, **pinned Sealed Sender server keys** and the **Sender Key wire format v4** — plus documentation of the residual risks. Please read [`§ Known Risks Before You Use`](#known-risks-before-you-use) before adopting, and [`§ Migrating from 0.3.x`](#migrating-from-03x) if you are upgrading.
 
-**One dependency. ~8,000 lines (with doc comments). Full Signal Protocol.**
+**One dependency. ~6,900 lines (with doc comments). Full Signal Protocol.**
 
 ---
 
@@ -18,7 +18,7 @@ This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@ca
 
 | Review | Status |
 |--------|--------|
-| Internal security audits (multiple rounds, 2026-03 ~ 2026-04) | Multiple findings resolved; residual risks documented below |
+| Internal security audits (multiple rounds, 2026-03 ~ 2026-11) | Multiple findings resolved; residual risks documented below |
 | Sealed Sender 6-stage internal audit pipeline | Resolved within scope; replay-cache persistence tracked as open limitation |
 | Production deployment — **SnowChat application** (service-layer code) | ✅ Active |
 | Production deployment — **this pub package**, directly consumed | ❌ None verified |
@@ -26,7 +26,7 @@ This library is the extracted cryptographic core of **[SnowChat](mailto:kennt@ca
 
 ### What this means in plain language
 
-- ✅ The cryptographic primitives (X25519 DH, Ed25519, HKDF, XSalsa20-Poly1305) are sound and audited.
+- ✅ The cryptographic primitives (X25519 DH, Ed25519, HKDF, XSalsa20-Poly1305) are sound and audited. Every signature that decides trust is verified with **strict Ed25519** (`verifyEd25519Strict`: canonical scalar S < L, no small-order or non-canonical keys) — plain TweetNaCl verification accepts both.
 - ✅ X3DH, Double Ratchet, Sender Key, and Sealed Sender have been internally reviewed end-to-end.
 - ⚠️ The **service layer** (`SignalProtocolService`) is what was battle-tested inside SnowChat. The lower-level classes (`DoubleRatchetSession`, `SenderKeyManager`, `SealedSenderService`) have known caller-responsibility contracts — see [`§ Known Risks`](#known-risks-before-you-use).
 - ⚠️ **No external third-party audit** has been conducted. Do not deploy to high-stakes adversaries without additional review.
@@ -64,34 +64,40 @@ The class-level docstring on `DoubleRatchetSession` carries this same warning.
 `SealedSenderService._ReplayCache` is a process-local `Map`. On app restart the cache is cleared; an attacker who captured a sealed envelope earlier can re-deliver it during the 24-hour timestamp window and the unseal will succeed. **Whether this produces user-visible impact depends on what you layer below the Sealed Sender stage:**
 
 - If the inner payload is a Double Ratchet ciphertext and the DR ratchet has advanced past that message number, DR rejects the replay (trial-decrypt rollback — see §1).
-- If the inner payload is a Sender Key group ciphertext, the backported `cachedMessageKeys` (kept for drift-retry safety) **will return plaintext**. Your application must deduplicate (e.g. via `UNIQUE(sender, timestamp, conversation)` at the storage layer).
+- If the inner payload is a Sender Key group ciphertext (wire format v4, since 0.4.0), a message key reads one message: the replay fails as `SenderKeyFailure.expired` — **as long as you persist the `SenderKeyManager` records together with the plaintext a read produced**. Deduplicate at the storage layer anyway (e.g. `UNIQUE(sender, message id, conversation)`).
 - If the inner payload is VoIP signalling, application-level state machines naturally reject stale signalling.
 
 A persistent replay cache (spanning process restart) is on the roadmap but **not** in this release.
 
-### 3. Identity verification is **opt-in** — use `VerifiedIdentityStore` (Identity Binding v1)
+### 3. Identity Binding v1 is **mandatory** — you must provide a persistent `VerifiedIdentityStore`
 
-Which identity model you wire into `SignalProtocolService` decides what a malicious or compromised **server** can do to your users:
+`SignalProtocolService(identityStore: …)` requires an identity store. Every new session — send side and receive side — goes through identity admission before X3DH, and a peer that does not present a valid account-signed binding is **refused**: there is no TOFU fallback and no configuration without identity checks (since 0.4.0).
 
-| Constructor | Model | What a hostile server can do |
-|---|---|---|
-| `SignalProtocolService()` | **none** | Substitute any peer's keys, any time, silently. Tests and tools only. |
-| `SignalProtocolService(identityPinStore: …)` | **deprecated** TOFU on the Signal Ed25519 key | Substitute keys on first contact and after every reinstall (the pin is keyed by device id, which changes per install) — silently. |
-| `SignalProtocolService(identityStore: …)` | **Identity Binding v1** (recommended) | Nothing silent for peers that publish a binding: a substituted, replayed (older epoch) or stripped (downgrade) binding raises `IdentityBindingInvalidException`. Binding-less (legacy) peers fall back to Signal-style TOFU with user-visible change notices. |
+| Threat from a hostile server | Outcome |
+|---|---|
+| Substitutes a peer's bundle (send side) | ❌ refused — `signatureInvalid` / `accountKeyMismatch` |
+| Swaps the X3DH header identity key of a PreKey message | ❌ refused — the binding is verified over the header key, before any prekey is touched |
+| Strips the binding of a peer (first contact or later) | ❌ refused — `bindingRequired`, or `downgrade` for a latched peer |
+| Replays an older, validly signed binding | ❌ refused — `epochRegression` |
+| Signs bindings with a stolen account key (leaked recovery phrase) | ⚠️ accepted; surfaced as a `deviceKeysChanged` notice |
 
-**How Identity Binding v1 works.** Each user has a long-term Ed25519 **account key**, and the peer id is *derived* from it (`IdentityIdScheme`; the default `SnowChatIdScheme` is `"snow" + hex(key[0..16])`). Every device signs a 172-byte binding — `0xFF || "SnowChat_IdentityBinding_v1" || peerId || deviceId || epoch || X25519 identity key || Ed25519 key` — with the account key. Anyone who knows the peer id can verify a bundle **offline**; the server is only a relay. The receiver also verifies the binding embedded in PreKey (type-2) messages *before* any signed/one-time prekey is touched, so a rejected sender cannot burn your one-time prekeys. A per-peer **latch** (highest accepted epoch) is never deleted: once a peer has proven a binding, unbound keys and older bindings are refused forever.
+**How Identity Binding v1 works.** Each user has a long-term Ed25519 **account key**, and the peer id is *derived* from it (`IdentityIdScheme`; the default `SnowChatIdScheme` is `"snow" + hex(key[0..16])`). Every device signs a 172-byte binding — `0xFF || "SnowChat_IdentityBinding_v1" || peerId || deviceId || epoch || X25519 identity key || Ed25519 key` — with the account key. Anyone who knows the peer id can verify a bundle **offline**; the server is only a relay. The receiver also verifies the binding embedded in PreKey (type-2) messages *before* any signed/one-time prekey is touched, so a rejected sender cannot burn your one-time prekeys. A per-peer **latch** (highest accepted epoch) is never deleted: once a peer has proven a binding, older bindings are refused forever.
 
 **What you must provide** (the library cannot do these for you):
 
-1. **A persistent `VerifiedIdentityStore`** subclass on platform-secure storage. Persist the record *and* the latch; the latch must survive contact deletion and must never decrease. `InMemoryVerifiedIdentityStore` is a reference for tests only.
+1. **A persistent `VerifiedIdentityStore`** subclass on platform-secure storage, implementing `readRecord` / `writeRecord` / `deleteRecord` / `readLatch` / `writeLatch`. Persist the record *and* the latch; the latch must survive contact deletion and must never decrease. `InMemoryVerifiedIdentityStore` is a reference for tests only.
 2. **Peer ids derived from account keys.** If your ids are not a function of an account key, bindings cannot be verified against them — supply your own `IdentityIdScheme` (36 ASCII chars, ≥ 128 bits of the key).
-3. **Account-key hygiene.** Use `IdentityBindingV1.sign()` (it can only sign 0xFF-prefixed binding messages) and keep every other use of the account key purpose-bound — never expose a "sign arbitrary bytes" API backed by it. Mint epochs with `IdentityBindingV1.nextEpoch()` above both your local high-water mark and the server's account-wide maximum, and persist the epoch before signing.
+3. **A binding for every device.** Sign with `IdentityBindingV1.sign()` (it can only sign 0xFF-prefixed binding messages), install it with `setLocalIdentityBinding()` so it is embedded in your PreKey messages, and upload it next to your prekey bundle. Keep every other use of the account key purpose-bound — never expose a "sign arbitrary bytes" API backed by it. Mint epochs with `IdentityBindingV1.nextEpoch()` above both your local high-water mark and the server's account-wide maximum, and persist the epoch before signing.
 4. **Server cooperation.** Store and serve `binding.wire` and the account public key next to the prekey bundle, and pass them to `createSession` as `identityBinding` (parsed with `IdentityBinding.tryParseWire`; a present-but-unparseable binding must be flagged with `identityBindingUnparseable: true`, never dropped) and `accountPublicKey`. Prefer a **non-consuming** identity directory endpoint and pre-admit with `IdentityAdmission.admitDirectory()` before fetching a bundle, so a refused peer never costs a one-time prekey. Pick among multiple devices with `IdentityAdmission.selectDevice()`.
-5. **Receive side.** Pass `envelopeDeviceId` (the device your authenticated envelope / sealed-sender certificate names) and an `identityDirectoryLookup` for binding-less senders to `decryptMessage`.
-6. **Error handling.** `IdentityBindingInvalidException` is terminal — show it, do not retry (retries only burn one-time prekeys). `IdentityKeyChangedException` means a *verified* legacy peer changed keys; the peer stays blocked until the user re-verifies and you call `VerifiedIdentityStore.acceptPendingChange()`. Surface `VerifiedIdentityStore.events` (`legacyKeyChanged`, `deviceKeysChanged`, `interceptionSuspected`, …) to the user.
+5. **Receive side.** Pass `envelopeDeviceId` (the device your authenticated envelope / sealed-sender certificate names) and an `identityDirectoryLookup` (non-consuming; used only for a sender whose PreKey message carries no binding — admitted only through a server-held binding for its header identity key) to `decryptMessage`.
+6. **Error handling.** `IdentityBindingInvalidException` is terminal — show it, do not retry (retries only burn one-time prekeys). Surface `VerifiedIdentityStore.events` (`deviceKeysChanged`, `bindingRejected`) to the user.
 7. **Safety Numbers over account keys.** Use `SafetyNumber.forAccountKeys()`; it is stable across device reinstalls and identical on both sides.
 
-Optional hardening: `VerifiedIdentityStore.pinFromInviteLink()` pins a peer's account key from an out-of-band link / QR code and latches the peer immediately, closing the first-contact downgrade window.
+Optional hardening: `VerifiedIdentityStore.pinAccountKey()` pins a peer's account key from an out-of-band source (invite link, QR code, the user's own authenticated backup) and latches the peer immediately.
+
+### 3a. Sealed Sender server keys must be **pinned in your build**
+
+`SealedSenderService(trustedServerKeys: [...])` accepts a sender certificate only when one of the listed Ed25519 keys signed it. Ship the key(s) inside the application (constants or bundled configuration) and **never take them from a server response**: a server that can hand out its own key can sign a certificate for any account and impersonate any sender. Rotate by releasing a build that trusts the current **and** the next key, then switching the server, then dropping the old key in a later release.
 
 ### 4. `SignalProtocolService` imports `dart:io`; Flutter Web builds WILL fail
 
@@ -112,12 +118,24 @@ _x3dhInfo5DH     = "SnowChat_X3DH_5DH"   // X3DH with one-time prekey (since 0.3
 _rkInfo          = "SnowChat_Ratchet"
 _sealedSenderInfo = "SnowChat_SealedSender_v1"
 IdentityBindingV1.label = "SnowChat_IdentityBinding_v1" // binding format label (since 0.3.0)
+_boundSignatureLabel = "SnowChat_GV2_Msg_v1"            // Sender Key v4 signature label (since 0.4.0)
 ```
 
 If you use this library as the cryptographic core of a non-SnowChat product, your keys are derived under SnowChat's domain separation. Two consequences:
 
 1. Forensically your keys are traceable to this library's brand — acceptable for most use cases, but note it.
 2. A future version may accept these labels via a config object; that would be a **wire-breaking** change. Track the [`CHANGELOG`](CHANGELOG.md) before upgrading.
+
+---
+
+## Migrating from 0.3.x
+
+0.4.0 is wire- and API-breaking; upgrade all peers together. Full list in the [`CHANGELOG`](CHANGELOG.md).
+
+1. **TOFU is gone.** `SignalProtocolService` requires `identityStore:`; `IdentityPinStore`, `IdentityKeyChangedException`, `acceptPendingChange`, `importLegacyPin`, `seedLegacyIdentityKeys`, `isPeerVerified` and the legacy events are removed. Every peer needs an Identity Binding v1; peers without one are refused (`bindingRequired`). Drop `senderIdentityKeyEd25519:` from `decryptMessage`. `pinFromInviteLink` is now `pinAccountKey`. Existing bound records keep working; unbound 0.3.x records are read as account-key pins (their TOFU keys are dropped).
+2. **Sealed Sender keys are pinned.** `SealedSenderService(serverVerifyKey: k)` → `SealedSenderService(trustedServerKeys: [k])`, with `k` shipped in your build; `SenderCertificate.verify(k)` → `verify([k])`.
+3. **Sender Key wire format v4.** `encryptGroupMessage` / `decryptGroupMessage` → `encryptBoundGroupMessage` / `decryptBoundGroupMessage` with a 32-byte binding; the distribution message is a 72-byte body whose group and sender come from your context; the service no longer holds group state (use `SenderKeyManager` and persist `toJson()`); after upgrading, every member creates and distributes a new key. `MessageSendLog`, `SenderKeyDistributionTracker`, `rotateSenderKey` and `getExistingSKDM` are removed.
+4. **Strict Ed25519** needs no change from honest peers; malleated signatures and small-order keys are now refused.
 
 ---
 
@@ -142,25 +160,25 @@ Every other path to Signal Protocol in Flutter is painful:
 | Feature | Status |
 |---|---|
 | X25519 Diffie-Hellman | ✅ via TweetNaCl `crypto_scalarmult` (raw, no HSalsa20) |
-| Ed25519 signatures | ✅ via pinenacl |
+| Ed25519 signatures | ✅ via pinenacl; **strict** verification (S < L, no small-order keys) for every trust decision |
 | HKDF-SHA256 (RFC 5869) | ✅ pure Dart |
 | X3DH key agreement | ✅ |
 | Double Ratchet | ✅ with header AEAD binding |
 | Forward Secrecy | ✅ |
 | Post-Compromise Security | ✅ |
 | Out-of-order message handling | ✅ skipped message keys |
-| Sender Key (group messaging) | ✅ |
-| Multi-State SenderKeyRecord (5 generations) | ✅ |
+| Sender Key (group messaging), wire format v4 | ✅ signature bound to the caller's context + header; one read per message key |
+| Multi-State SenderKeyRecord (5 chains) | ✅ |
 | Out-of-order group cache (25,000 forward) | ✅ |
 | 31-bit random chain_id | ✅ |
 | File encryption (XSalsa20-Poly1305) | ✅ |
 | Small-subgroup attack mitigation | ✅ all-zero DH check |
 | Sealed Sender (ephemeral DH + HKDF + XSalsa20-Poly1305) | ✅ |
-| Sender Certificate (Ed25519 server-signed) | ✅ 177-byte fixed format |
-| Identity Binding v1 — account-signed Signal identities (see §3) | ✅ verify / sign / admission policy / store interface; caller provides storage + server support |
+| Sender Certificate (Ed25519 server-signed) | ✅ 177-byte fixed format; pinned trusted keys, rotation (see §3a) |
+| Sealed plaintext padding (opt-in, JSON) | ✅ `encodeSealedPlaintext` |
+| Identity Binding v1 — account-signed Signal identities, **mandatory** (see §3) | ✅ verify / sign / admission policy / store interface; caller provides storage + server support |
 | Downgrade + replay protection for bound peers (latch, epochs) | ✅ |
 | Safety Number v2 over account keys | ✅ `SafetyNumber.forAccountKeys` |
-| TOFU identity pinning (`IdentityPinStore`) | ⚠️ deprecated — superseded by Identity Binding v1 |
 | Trial-decrypt with snapshot/restore (service layer) | ✅ `SignalProtocolService` |
 | Archived sessions with TTL | ✅ 1h TTL for in-flight replays |
 | Optional debug logging | ✅ user-provided callback |
@@ -168,7 +186,7 @@ Every other path to Signal Protocol in Flutter is painful:
 | Flutter Web support | ❌ `SignalProtocolService` imports `dart:io` (see §4) |
 | Configurable HKDF info labels | ❌ hardcoded `SnowChat_*` (see §5) |
 | PNI (Phone Number Identity) | ❌ not implemented |
-| ZKGroup credentials | ❌ not implemented |
+| ZKGroup credentials | ❌ not implemented (SnowChat's group protocol v2 uses libsignal's zkgroup outside this library) |
 | Wire format compatibility with libsignal | ❌ independent implementation |
 | External security audit | ❌ none |
 | Bundled persistence layer | ❌ caller implements |
@@ -267,7 +285,65 @@ final plaintext = await bob.decryptMessage(
 print(String.fromCharCodes(plaintext)); // "Hello, Bob!"
 ```
 
-> **Note**: Prekey bundle distribution, session storage encryption key derivation, account-key management and the `VerifiedIdentityStore` persistence are your responsibility — see [`§ Known Risks #3`](#3-identity-verification-is-opt-in--use-verifiedidentitystore-identity-binding-v1). Without an `identityStore` the service keeps the pre-0.3.0 behaviour (`decryptMessage` then requires `senderIdentityKeyEd25519` for PreKey messages and embedded bindings are ignored).
+> **Note**: Prekey bundle distribution, session storage encryption key derivation, account-key management and the `VerifiedIdentityStore` persistence are your responsibility — see [`§ Known Risks #3`](#3-identity-binding-v1-is-mandatory--you-must-provide-a-persistent-verifiedidentitystore). A bundle or a PreKey message without a valid binding is refused with `IdentityBindingInvalidException`.
+
+### Sealed Sender
+
+```dart
+// Pinned in your build — never fetched from the server (see §3a).
+final sealed = SealedSenderService(trustedServerKeys: [serverSealedKey]);
+
+// Optional: pad the JSON plaintext so messages that fit one block look alike.
+final enc2 = await alice.encryptMessage(
+  recipientId: bobBinding.peerId,
+  deviceId: bobDevice,
+  plaintext: encodeSealedPlaintext({'type': 'text', 'body': 'hi'}),
+);
+final envelope = sealed.seal(
+  recipientIdentityPubKey: alice.getRemoteIdentityKey(bobBinding.peerId)!,
+  drCiphertext: enc2['ciphertext'] as Uint8List,
+  certificate: myServerIssuedCertificate,
+  messageContext: sealedType1to1,
+);
+
+// Bob: unseal, recover the Signal message type from the ciphertext itself,
+// and decrypt with the device the certificate names.
+final opened = sealed.unseal(
+  myIdentityPrivateKey: bob.identityPrivateKey!,
+  myIdentityPublicKey: bob.identityPublicKey!,
+  sealedEnvelope: envelope,
+);
+final type = bob.resolveSealedMessageType(opened.drCiphertext, opened.senderIdentityKey);
+final body = await bob.decryptMessage(
+  senderId: opened.senderSnowchatId,
+  deviceId: opened.senderDeviceId,
+  ciphertext: opened.drCiphertext,
+  messageType: type,
+  envelopeDeviceId: opened.senderDeviceId,
+);
+```
+
+### Group messaging (Sender Key v4)
+
+```dart
+final aliceGroups = SenderKeyManager(); // persist aliceGroups.toJson() yourself
+final bobGroups = SenderKeyManager();
+
+// Alice gives her key to each member over the 1:1 session (72 bytes).
+final skdm = aliceGroups.createSenderKey(groupId, alicePeerId);
+// …encryptMessage(plaintext: skdm.serialize()) to Bob…
+// Bob names the group and the sender from his authenticated context:
+bobGroups.processSenderKey(SenderKeyDistributionMessage.deserialize(
+    received, groupId: groupId, senderId: alicePeerId)!);
+
+// Both sides compute the same 32-byte binding for a message.
+final binding = sha256(Uint8List.fromList(utf8.encode('$groupId|$messageId')));
+final ct = aliceGroups.encryptBoundGroupMessage(groupId, alicePeerId, plaintext, binding);
+final pt = bobGroups.decryptBoundGroupMessage(groupId, alicePeerId, ct, binding);
+// Failures throw SenderKeyException (malformed / noKey / signature / expired /
+// tooFarAhead / decrypt); the stored key is never changed by a failure.
+// After a member leaves: createSenderKey() again and distribute it.
+```
 
 ---
 
@@ -279,28 +355,26 @@ lib/
 └── src/
     ├── x25519.dart                         # X25519 DH wrapper
     ├── hkdf.dart                           # SHA-256, HMAC, HKDF (RFC 5869)
-    ├── prekey_bundle.dart                  # PreKey bundle + signature verify
+    ├── ed25519_strict.dart                 # strict Ed25519 verification (S < L, no small-order keys)
+    ├── prekey_bundle.dart                  # PreKey bundle + strict signature verify
     ├── x3dh.dart                           # Extended Triple Diffie-Hellman
     ├── double_ratchet.dart                 # Double Ratchet (see §1 on direct use)
-    ├── sender_key.dart                     # Sender Key (group messaging)
-    ├── sender_key_tracker.dart             # SKDM distribution tracker
-    ├── message_send_log.dart               # 24-hour retry log
+    ├── sender_key.dart                     # Sender Key, wire format v4 (group messaging)
     ├── file_encryptor.dart                 # File body encryption
-    ├── sealed_sender.dart                  # Sealed Sender (see §2 on replay)
+    ├── sealed_sender.dart                  # Sealed Sender (see §2 on replay, §3a on keys)
+    ├── sealed_plaintext.dart               # opt-in JSON plaintext padding
     ├── sender_certificate.dart             # Ed25519 server-signed sender certificate
     ├── identity_binding.dart               # Identity Binding v1: format, verify, sign, IdentityIdScheme
     ├── identity_binding_exception.dart     # typed, non-retryable binding rejection
-    ├── identity_admission.dart             # admission policy (bound / legacy / device selection)
+    ├── identity_admission.dart             # admission policy (bound only; device selection)
     ├── verified_identity_store.dart        # store interface + in-memory reference (see §3)
     ├── safety_number.dart                  # Safety Number v2 over account keys
     ├── identity_bytes.dart                 # internal byte helpers (not exported)
-    ├── identity_pin_store.dart             # DEPRECATED TOFU pin interface
-    ├── identity_key_changed_exception.dart # typed "keys changed, re-verify" exception
-    ├── signal_protocol_service.dart        # high-level orchestrator (Flutter-free but dart:io)
+    ├── signal_protocol_service.dart        # high-level 1:1 orchestrator (Flutter-free but dart:io)
     └── logger.dart                         # optional debug logging facade
 ```
 
-Total: ~7,800 lines of Dart code (including doc comments).
+Total: ~6,900 lines of Dart code (including doc comments).
 
 ---
 
@@ -325,26 +399,26 @@ The library does **not** depend on Flutter. `SignalProtocolService` imports `dar
 
 - **Cryptographic primitives**: X25519, Ed25519, HKDF-SHA256, HMAC, XSalsa20-Poly1305 (via pinenacl).
 - **Signal Protocol algorithms**: X3DH, Double Ratchet, Sender Key.
-- **Security mitigations**: small-subgroup DH attack defense, header AEAD binding, signed prekey verification, all-zero DH rejection, fail-closed on missing sender Ed25519 verify key (legacy mode).
-- **Identity Binding v1** (0.3.0-alpha.1): account-signed Signal identities verified offline against the peer id on both send and receive paths, downgrade latch, epoch anti-replay, canonical-signature / small-order key checks, Signal-style legacy policy, bound-session purge, Safety Number v2 over account keys.
-- **Group messaging extensions**: Multi-State SenderKeyRecord (5 generations), out-of-order cache, chain_id wire field, distribution tracker, origin SKDM cache, corrupt-recovery removal.
-- **Sealed Sender**: sender anonymity via ephemeral X25519 DH with HKDF key derivation, XSalsa20-Poly1305 encryption, in-memory replay cache (10K entries, 24h TTL), random padding, and Ed25519 server-signed sender certificates.
-- **Service-layer hardenings** (backported from SnowChat v0.2.0-alpha.1): multi-session storage per peer, archived sessions with TTL, snapshot/restore trial-decrypt, TOFU identity pin interface, plaintext-save refusal.
+- **Security mitigations**: small-subgroup DH attack defense, header AEAD binding, strict Ed25519 for signed prekeys / sender certificates / Sender Key messages / identity bindings, all-zero DH rejection, fail-closed on a missing sender Ed25519 key.
+- **Identity Binding v1** (0.3.0, mandatory since 0.4.0): account-signed Signal identities verified offline against the peer id on both send and receive paths, refusal of peers without a binding, downgrade latch, epoch anti-replay, canonical-signature / small-order key checks, bound-session purge, Safety Number v2 over account keys.
+- **Group messaging** (Sender Key wire format v4, 0.4.0): signature bound to a caller-supplied context hash and the message header, one read per message key, typed failures that never change the stored key, multi-state records (5 chains), out-of-order cache, 72-byte distribution body.
+- **Sealed Sender**: sender anonymity via ephemeral X25519 DH with HKDF key derivation, XSalsa20-Poly1305 encryption, in-memory replay cache (10K entries, 24h TTL), random padding, Ed25519 server-signed sender certificates checked against pinned keys, opt-in plaintext padding.
+- **Service-layer hardenings** (backported from SnowChat v0.2.0-alpha.1): multi-session storage per peer, archived sessions with TTL, snapshot/restore trial-decrypt, plaintext-save refusal.
 - **Receive-first robustness** (backported in 0.3.0-alpha.1): persistent PreKey messages until the peer replies, sealed messageType recovery + Sealed Sender Step 9 identity cross-check, one-time-prekey fail-loud, 4DH/5DH X3DH domain separation, atomic session-store writes, signed-prekey self-heal accessors.
 
 ### Not implemented
 
-- **Persistence back-ends**: session store encryption key derivation, the persistent `VerifiedIdentityStore`, prekey store implementations are left to the caller.
+- **Persistence back-ends**: session store encryption key derivation, the persistent `VerifiedIdentityStore`, Sender Key record persistence (`SenderKeyManager.toJson`), prekey store implementations are left to the caller.
 - **Account-key management and binding upload**: storing the account seed, the epoch high-water marks and uploading / re-uploading the binding are application concerns.
 - **Networking**: prekey bundle fetch, message delivery, etc., must be handled externally.
 - **PNI (Phone Number Identity)**: Signal's phone-number-decoupled identity system.
-- **ZKGroup**: zero-knowledge group credentials.
+- **ZKGroup / group membership**: zero-knowledge group credentials and membership management (who may receive a Sender Key) are application concerns.
 - **Wire format compatibility with libsignal**: this implementation has been tested against itself.
 - **Persistent Sealed Sender replay cache** (see [`§ Known Risks #2`](#2-sealed-sender-replay-cache-is-in-memory-only)).
 - **Flutter Web support** (see [`§ Known Risks #4`](#4-signalprotocolservice-imports-dartio-flutter-web-builds-will-fail)).
 - **Configurable HKDF info labels** (see [`§ Known Risks #5`](#5-hkdf-info-labels-are-hardcoded-to-snowchat_)).
 
-The original SnowChat project provides storage, networking, and identity-store implementations (including the migration from its pre-binding key layout) layered on top of this library. They are not included here because they depend on Flutter, drift, secure_storage, and other SnowChat-specific infrastructure.
+The original SnowChat project provides storage, networking, identity-store and group-membership implementations layered on top of this library. They are not included here because they depend on Flutter, drift, secure_storage, libsignal's zkgroup and other SnowChat-specific infrastructure.
 
 ---
 
@@ -361,7 +435,7 @@ The original SnowChat project provides storage, networking, and identity-store i
 | **Sealed Sender** | ✅ | ✅ |
 | **PNI** | ❌ | ✅ |
 | **ZKGroup** | ❌ | ✅ |
-| **Server-proof identity keys** | ✅ Identity Binding v1 (account-signed) | Safety Numbers / key transparency |
+| **Server-proof identity keys** | ✅ Identity Binding v1 (account-signed, mandatory) | Safety Numbers / key transparency |
 | **Wire format** | self-compatible | libsignal canonical |
 
 **Key takeaway**: libsignal has the audit pedigree, 2 billion users, and features (PNI, ZKGroup) we do not offer. We provide **Pure Dart portability and Sealed Sender support without native bindings**. Choose based on your platform constraints and threat model. Both libraries are AGPL-3.0.
@@ -379,6 +453,7 @@ High-impact contributions:
 - **Wire format compatibility tests** against libsignal
 - **Side-channel analysis** of timing-sensitive operations
 - **Persistent replay cache** implementation (addresses `§ Known Risks #2`)
+- **Runnable examples** (the `example/` directory)
 - **Platform-agnostic session-store adapter** (addresses `§ Known Risks #4`)
 - **Configurable HKDF info labels** (addresses `§ Known Risks #5`)
 - **Bug reports** and fixes
@@ -426,6 +501,7 @@ This library is built on the shoulders of:
 - [x] Public disclosure of residual risks (this README update)
 - [x] Receive-first / Sealed Sender first-contact fixes backport (`0.3.0-alpha.1`) — **wire-breaking for new X3DH sessions with 0.2.x peers**
 - [x] Identity Binding v1 + Safety Number v2 (`0.3.0-alpha.1`) — `IdentityPinStore` deprecated
+- [x] Mandatory identity bindings, strict Ed25519, pinned Sealed Sender keys, Sender Key wire format v4 (`0.4.0`) — **wire- and API-breaking**, TOFU removed
 - [ ] Persistent Sealed Sender replay cache
 - [ ] Platform-agnostic session-store adapter (Flutter Web unblock)
 - [ ] Configurable HKDF info labels
@@ -441,7 +517,7 @@ There is no fixed timeline. Progress depends on community interest and contribut
 
 ## About SnowChat
 
-SnowChat is an E2EE messenger + Solana wallet built by [Calida Lab](mailto:kennt@calidalab.ai). It implements Signal-level security (X3DH, Double Ratchet, Sender Key, Sealed Sender, GMK group metadata encryption) with on-device AI — all in Pure Dart with zero native dependencies.
+SnowChat is an E2EE messenger + Solana wallet built by [Calida Lab](mailto:kennt@calidalab.ai). Its messaging protocols (X3DH, Double Ratchet, Sender Key, Sealed Sender) are this Pure Dart code; its group membership uses libsignal's zkgroup, which is not part of this library.
 
 This library is the extracted cryptographic core. SnowChat adds the application layer: Flutter UI, drift persistence, Socket.IO transport, and Solana wallet integration. Where this library's caller-responsibility contracts require storage-layer decisions (replay dedup, identity store, session-store encryption), SnowChat's application layer supplies them.
 
