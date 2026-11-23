@@ -1,9 +1,9 @@
 /// @file        x25519_test.dart
-/// @description X25519 키 교환 테스트. 키쌍 생성, DH 교환성, all-zero 거부, 유니크성 검증
+/// @description X25519 key exchange tests: key pair generation, DH commutativity, all-zero rejection, uniqueness
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Key pair generation (32 bytes each)
@@ -11,6 +11,7 @@
 ///  - All-zero DH output rejection (CRITICAL)
 ///  - Different key pairs produce different DH results
 ///  - Key pair uniqueness
+library;
 
 import 'dart:typed_data';
 

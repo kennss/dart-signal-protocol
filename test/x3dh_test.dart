@@ -1,9 +1,9 @@
 /// @file        x3dh_test.dart
-/// @description X3DH 키 합의 프로토콜 테스트. 핸드셰이크 공유 비밀 일치, OPK 유무, 에러 조건 검증
+/// @description X3DH key agreement tests: matching shared secret, with and without a one-time prekey, error conditions
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Full X3DH handshake produces shared secret
@@ -12,6 +12,7 @@
 ///  - With one-time prekey
 ///  - Different identity keys produce different secrets
 ///  - Ephemeral key is 32 bytes
+library;
 
 import 'dart:typed_data';
 

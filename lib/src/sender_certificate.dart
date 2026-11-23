@@ -1,16 +1,17 @@
 /// @file        sender_certificate.dart
-/// @description Sealed Sender 용 발신자 인증서. 고정 177바이트 바이너리 직렬화/역직렬화, Ed25519 서명 검증, 만료 확인
+/// @description Sender certificate for Sealed Sender: fixed 177-byte binary serialization, Ed25519 signature verification, expiry check
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-04-20
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-20
 ///
 /// @functions
-///  - SenderCertificate: 발신자 인증서 데이터 클래스 (177바이트 고정)
-///  - SenderCertificate.toBytes(): 인증서를 177바이트 바이너리로 직렬화
-///  - SenderCertificate.fromBytes(): 177바이트 바이너리에서 인증서 역직렬화
-///  - SenderCertificate.verify(): Ed25519 서명 검증 + 만료 확인
-///  - SenderCertificate.isExpired: 인증서 만료 여부
+///  - SenderCertificate: Sender certificate data class (fixed 177 bytes)
+///  - SenderCertificate.toBytes(): Serialize the certificate to 177 bytes
+///  - SenderCertificate.fromBytes(): Deserialize a certificate from 177 bytes
+///  - SenderCertificate.verify(): Ed25519 signature verification + expiry check
+///  - SenderCertificate.isExpired: Whether the certificate has expired
+library;
 
 import 'dart:convert';
 import 'dart:typed_data';

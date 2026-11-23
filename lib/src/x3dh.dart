@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-11-10 (backport SnowChat ddfbe6d: domain-separated HKDF info — SnowChat_X3DH_4DH vs SnowChat_X3DH_5DH; BREAKING wire change for new sessions)
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (backport SnowChat ddfbe6d: domain-separated HKDF info — SnowChat_X3DH_4DH vs SnowChat_X3DH_5DH; BREAKING wire change for new sessions)
 ///
 /// @functions
 ///  - X3DHResult: X3DH session establishment result (shared secret + ephemeral public key)
@@ -15,12 +15,13 @@
 ///    prekey) and 5-DH (with one-time prekey) paths use DIFFERENT info so a
 ///    silent OPK-path mismatch between initiator and responder fails loudly
 ///    on the first AEAD check instead of yielding a quietly wrong secret.
+library;
 
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'x25519.dart';
 import 'hkdf.dart';
+import 'x25519.dart';
 
 /// Result of the X3DH key agreement (initiator side).
 class X3DHResult {

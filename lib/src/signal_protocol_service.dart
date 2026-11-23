@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-29
-/// @lastUpdated 2026-11-10 (Identity Binding v1 (SnowChat 1f90c4e): optional VerifiedIdentityStore replaces the TOFU IdentityPinStore — createSession() verifies the bundle's account-signed binding (or applies the Signal-style legacy policy) BEFORE X3DH; type-2 messages embed our binding and decryptMessage() verifies the sender's binding offline BEFORE any SPK/OPK is touched; sessions record remoteIdentityKey and sessions not matching a bound peer's IK are purged and never used. Earlier same day: backport SnowChat c062a09/dc71736/591d0b9/ddfbe6d: resolveSealedMessageType() + Sealed Sender Step 9, persistent PreKey until first inbound decrypt, type-2 archive fallback, OPK fail-loud, saveSessionStore -> Future<bool> with atomic write, signedPreKeyPublicKey()/hasAnySignedPreKey for SPK self-heal; header translated to English)
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (Identity Binding v1 (SnowChat 1f90c4e): optional VerifiedIdentityStore replaces the TOFU IdentityPinStore — createSession() verifies the bundle's account-signed binding (or applies the Signal-style legacy policy) BEFORE X3DH; type-2 messages embed our binding and decryptMessage() verifies the sender's binding offline BEFORE any SPK/OPK is touched; sessions record remoteIdentityKey and sessions not matching a bound peer's IK are purged and never used. Earlier same day: backport SnowChat c062a09/dc71736/591d0b9/ddfbe6d: resolveSealedMessageType() + Sealed Sender Step 9, persistent PreKey until first inbound decrypt, type-2 archive fallback, OPK fail-loud, saveSessionStore -> Future<bool> with atomic write, signedPreKeyPublicKey()/hasAnySignedPreKey for SPK self-heal; header translated to English)
 ///
 /// @functions
 ///  - SignalProtocolService: Pure Dart Signal Protocol implementation class
@@ -30,6 +30,7 @@
 ///  - SignalProtocolService.enforceBoundSessions(): purge sessions not matching a bound peer IK
 ///  - SignalProtocolService.remoteIdentityKeySnapshot(): copy of the learned remote IKs
 ///  - SignalProtocolException: Signal Protocol exception class
+library;
 
 // The deprecated IdentityPinStore is still honoured for integrators that have
 // not migrated to VerifiedIdentityStore.
@@ -884,7 +885,7 @@ class SignalProtocolService {
         : null;
 
     if (latestSpk == null) {
-      throw SignalProtocolException(
+      throw const SignalProtocolException(
         'No signed prekey available. Call generateSignedPreKey() first.',
       );
     }
@@ -1808,7 +1809,7 @@ class SignalProtocolService {
         final rawData = await file.readAsBytes();
         try {
           final box = nacl_api.SecretBox(_storeEncryptionKey!);
-          final nonceLen = nacl_api.EncryptedMessage.nonceLength;
+          const nonceLen = nacl_api.EncryptedMessage.nonceLength;
           final decrypted = box.decrypt(nacl_api.EncryptedMessage(
             nonce: rawData.sublist(0, nonceLen),
             cipherText: rawData.sublist(nonceLen),
@@ -2143,12 +2144,12 @@ class SignalProtocolService {
 
   void _ensureIdentity() {
     if (_identityKeyPair == null) {
-      throw SignalProtocolException(
+      throw const SignalProtocolException(
         'Identity key pair not generated. Call generateIdentityKeyPair() first.',
       );
     }
     if (_identitySigningKeySeed == null) {
-      throw SignalProtocolException(
+      throw const SignalProtocolException(
         'Ed25519 signing key not set. Call setSigningKey() or '
         'generateIdentityKeyPair() first.',
       );

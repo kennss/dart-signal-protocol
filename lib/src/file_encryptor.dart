@@ -1,14 +1,15 @@
 /// @file        file_encryptor.dart
-/// @description 파일 암복호화. 랜덤 키로 파일을 XSalsa20-Poly1305 암호화하고 SHA-256 해시 생성
+/// @description File encryption. Encrypts a file with a random key (XSalsa20-Poly1305) and computes its SHA-256 hash
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-03-30
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-03-30
 ///
 /// @functions
-///  - EncryptedFileResult: 암호화된 파일 결과 (암호문, 파일 키, 콘텐츠 해시)
-///  - FileEncryptor.encryptFile(): 랜덤 키로 파일 암호화
-///  - FileEncryptor.decryptFile(): 파일 키로 파일 복호화
+///  - EncryptedFileResult: Encrypted file result (ciphertext, file key, content hash)
+///  - FileEncryptor.encryptFile(): Encrypt a file with a random key
+///  - FileEncryptor.decryptFile(): Decrypt a file with its file key
+library;
 
 import 'dart:math';
 import 'dart:typed_data';
@@ -107,7 +108,7 @@ class FileEncryptor {
 
     // Decrypt with XSalsa20-Poly1305
     final box = nacl_api.SecretBox(fileKey);
-    final nonceLen = nacl_api.EncryptedMessage.nonceLength;
+    const nonceLen = nacl_api.EncryptedMessage.nonceLength;
 
     if (encryptedData.length <= nonceLen) {
       throw ArgumentError('Encrypted data too short');

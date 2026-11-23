@@ -1,9 +1,9 @@
 /// @file        hkdf_test.dart
-/// @description HKDF (RFC 5869) 및 HMAC-SHA256 테스트. RFC 테스트 벡터, 결정론, 경계 조건 검증
+/// @description HKDF (RFC 5869) and HMAC-SHA256 tests: RFC test vectors, determinism, boundary conditions
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - RFC 5869 test vectors (known input -> known output)
@@ -11,6 +11,7 @@
 ///  - Different salt/info produce different keys
 ///  - Empty salt handling
 ///  - Zero-length output rejection
+library;
 
 import 'dart:convert';
 import 'dart:typed_data';

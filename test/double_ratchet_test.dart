@@ -1,9 +1,9 @@
 /// @file        double_ratchet_test.dart
-/// @description Double Ratchet 알고리즘 테스트. 암복호화 왕복, 양방향 대화, 순서 뒤바뀜, 에러 조건 검증
+/// @description Double Ratchet tests: encrypt/decrypt round trip, two-way conversation, out-of-order delivery, error conditions
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Encrypt -> decrypt round-trip
@@ -14,6 +14,7 @@
 ///  - Large message (10KB)
 ///  - Multiple messages advance the chain
 ///  - Session serialization/deserialization
+library;
 
 import 'dart:convert';
 import 'dart:typed_data';
@@ -101,9 +102,9 @@ void main() {
       expect(decrypted, equals(plaintext));
     });
 
-    test('UTF-8 message with Korean text', () {
+    test('UTF-8 multi-byte message', () {
       final sessions = _createSessionPair();
-      final text = 'Hello world! Signal Protocol test.';
+      const text = 'Gr\u00fc\u00dfe \u2014 caf\u00e9 \u2713 Signal Protocol test.';
       final plaintext = Uint8List.fromList(utf8.encode(text));
 
       final encrypted = sessions.alice.encrypt(plaintext);

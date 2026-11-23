@@ -1,5 +1,5 @@
 /// @file        sender_key_test.dart
-/// @description Sender Key 프로토콜 테스트. 그룹 키 생성, SKDM 배포, 그룹 암복호화, 다중 멤버, 비멤버 거부
+/// @description Sender Key protocol tests: group key creation, SKDM distribution, group encrypt/decrypt, multiple members, non-member rejection
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10

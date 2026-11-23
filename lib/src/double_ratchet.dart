@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-11-10 (Identity Binding v1: sessions persist remoteIdentityKey — the peer X25519 identity key used in X3DH — so sessions can be checked against a peer's account-bound identity; header translated to English)
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (Identity Binding v1: sessions persist remoteIdentityKey — the peer X25519 identity key used in X3DH — so sessions can be checked against a peer's account-bound identity; header translated to English)
 ///
 /// @functions
 ///  - EncryptedMessage: encrypted message data class (ciphertext + ratchet key + message number)
@@ -14,6 +14,7 @@
 ///  - DoubleRatchetSession.decrypt(): decrypt an EncryptedMessage into plaintext
 ///  - DoubleRatchetSession.toJson(): serialize session state
 ///  - DoubleRatchetSession.fromJson(): deserialize session state
+library;
 
 import 'dart:convert';
 import 'dart:math';

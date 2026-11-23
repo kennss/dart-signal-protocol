@@ -1,9 +1,9 @@
 /// @file        sealed_sender_test.dart
-/// @description Sealed Sender 서비스 테스트. seal/unseal 왕복, 리플레이 탐지, 타임스탬프 윈도우, 패딩, 에러 조건
+/// @description Sealed Sender service tests: seal/unseal round trip, replay detection, timestamp window, padding, error conditions
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Seal -> unseal round-trip
@@ -15,6 +15,7 @@
 ///  - Version byte check (unknown version -> rejected)
 ///  - Certificate verification (valid -> pass, tampered -> fail)
 ///  - Generic error messages (no oracle leakage)
+library;
 
 import 'dart:convert';
 import 'dart:typed_data';

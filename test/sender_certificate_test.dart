@@ -1,9 +1,9 @@
 /// @file        sender_certificate_test.dart
-/// @description SenderCertificate 테스트. 직렬화/역직렬화, 필드 보존, 만료 검증, 서명 검증, 에러 조건
+/// @description SenderCertificate tests: serialization round trip, field preservation, expiry, signature verification, error conditions
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Serialize -> deserialize round-trip (177 bytes)
@@ -12,6 +12,7 @@
 ///  - Wrong server key -> verify fails
 ///  - Truncated bytes -> rejection
 ///  - Field length validation (snowchatId != 36 bytes -> error)
+library;
 
 import 'dart:typed_data';
 

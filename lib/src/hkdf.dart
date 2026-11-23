@@ -1,15 +1,16 @@
 /// @file        hkdf.dart
-/// @description HMAC-SHA256 기반 HKDF (RFC 5869) 키 유도 함수. Signal Protocol 키 파생에 사용
+/// @description HMAC-SHA256 based HKDF (RFC 5869) key derivation, used for every Signal Protocol key derivation
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-03-30
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-03-30
 ///
 /// @functions
-///  - hmacSha256(key, data): HMAC-SHA256 계산
-///  - hkdfExtract(salt, ikm): HKDF Extract 단계
-///  - hkdfExpand(prk, info, length): HKDF Expand 단계
-///  - hkdfDerive(ikm, salt, info, length): HKDF Extract + Expand 통합
+///  - hmacSha256(key, data): Compute HMAC-SHA256
+///  - hkdfExtract(salt, ikm): HKDF Extract step
+///  - hkdfExpand(prk, info, length): HKDF Expand step
+///  - hkdfDerive(ikm, salt, info, length): HKDF Extract + Expand combined
+library;
 
 import 'dart:typed_data';
 
@@ -119,20 +120,20 @@ Uint8List sha256(Uint8List data) {
   }
 
   final result = Uint8List(32);
-  void _put32(int offset, int value) {
+  void put32(int offset, int value) {
     result[offset] = (value >>> 24) & 0xFF;
     result[offset + 1] = (value >>> 16) & 0xFF;
     result[offset + 2] = (value >>> 8) & 0xFF;
     result[offset + 3] = value & 0xFF;
   }
-  _put32(0, h0);
-  _put32(4, h1);
-  _put32(8, h2);
-  _put32(12, h3);
-  _put32(16, h4);
-  _put32(20, h5);
-  _put32(24, h6);
-  _put32(28, h7);
+  put32(0, h0);
+  put32(4, h1);
+  put32(8, h2);
+  put32(12, h3);
+  put32(16, h4);
+  put32(20, h5);
+  put32(24, h6);
+  put32(28, h7);
 
   return result;
 }
@@ -146,7 +147,7 @@ Uint8List hmacSha256(Uint8List key, Uint8List data) {
   const blockSize = 64; // SHA-256 block size
 
   // If key is longer than block size, hash it
-  var k = key.length > blockSize ? sha256(key) : key;
+  final k = key.length > blockSize ? sha256(key) : key;
 
   // Pad key to block size
   final paddedKey = Uint8List(blockSize);

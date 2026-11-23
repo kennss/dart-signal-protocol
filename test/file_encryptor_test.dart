@@ -1,9 +1,9 @@
 /// @file        file_encryptor_test.dart
-/// @description FileEncryptor 테스트. 암복호화 왕복, 잘못된 키, 빈 파일, 대용량 파일, 해시 검증
+/// @description FileEncryptor tests: round trip, wrong key, empty file, large file, hash verification
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-04-10
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Encrypt -> decrypt round-trip
@@ -13,6 +13,7 @@
 ///  - Key is 32 bytes
 ///  - Content hash verification
 ///  - Hash mismatch detection
+library;
 
 import 'dart:math';
 import 'dart:typed_data';

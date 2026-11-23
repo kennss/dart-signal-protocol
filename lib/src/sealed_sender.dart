@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-11-10 (backport SnowChat c062a09: Step 9 comment — the identity cross-check is performed by SignalProtocolService.resolveSealedMessageType(); no code change; header translated to English)
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (backport SnowChat c062a09: Step 9 comment — the identity cross-check is performed by SignalProtocolService.resolveSealedMessageType(); no code change; header translated to English)
 ///
 /// @functions
 ///  - SealedSenderService: Sealed Sender encryption/decryption service
@@ -11,6 +11,7 @@
 ///  - SealedSenderService.unseal(): Unseal (replay check -> DH -> HKDF -> decrypt -> certificate verify)
 ///  - UnsealedMessage: Unseal result data class
 ///  - _ReplayCache: EK_seal based LRU replay cache (10K entries, 24h TTL)
+library;
 
 import 'dart:convert';
 import 'dart:math';

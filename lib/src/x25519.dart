@@ -1,24 +1,25 @@
 /// @file        x25519.dart
-/// @description X25519 Diffie-Hellman 키 교환 및 Ed25519→X25519 키 변환. pinenacl TweetNaCl 기반
+/// @description X25519 Diffie-Hellman key exchange and Ed25519 -> X25519 key conversion, built on pinenacl's TweetNaCl
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-04-12
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-12
 ///
 /// @functions
-///  - X25519KeyPair: X25519 키쌍 데이터 클래스
-///  - X25519KeyPair.generate(): 새 X25519 키쌍 생성
+///  - X25519KeyPair: X25519 key pair data class
+///  - X25519KeyPair.generate(): Generate a new X25519 key pair
 ///  - x25519Dh(privateKey, publicKey): raw X25519 DH (crypto_scalarmult)
-///  - ed25519PublicKeyToX25519(ed25519PublicKey): Ed25519 공개키를 X25519로 변환
-///  - ed25519PrivateKeyToX25519(ed25519PrivateSeed): Ed25519 개인키를 X25519로 변환
+///  - ed25519PublicKeyToX25519(ed25519PublicKey): Convert an Ed25519 public key to X25519
+///  - ed25519PrivateKeyToX25519(ed25519PrivateSeed): Convert an Ed25519 private seed to X25519
+library;
 
 import 'dart:typed_data';
 
-import 'package:pinenacl/x25519.dart' as nacl;
 import 'package:pinenacl/ed25519.dart' as ed;
-// Direct access to TweetNaCl for raw crypto_scalarmult (no HSalsa20)
-// TweetNaClExt is included via part-of in tweetnacl.dart
-import 'package:pinenacl/src/tweetnacl/tweetnacl.dart';
+// Direct access to TweetNaCl for raw crypto_scalarmult (no HSalsa20);
+// TweetNaClExt is part of the same public library.
+import 'package:pinenacl/tweetnacl.dart';
+import 'package:pinenacl/x25519.dart' as nacl;
 
 /// An X25519 (Curve25519) key pair for Diffie-Hellman key exchange.
 class X25519KeyPair {
@@ -83,7 +84,7 @@ Uint8List ed25519PrivateKeyToX25519(Uint8List ed25519PrivateSeed) {
   // SigningKey stores the full 64-byte key internally
   final fullKey = Uint8List.fromList([
     ...ed25519PrivateSeed,
-    ...signingKey.verifyKey.toList(),
+    ...signingKey.verifyKey,
   ]);
   final out = Uint8List(32);
   try {

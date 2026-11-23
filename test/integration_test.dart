@@ -3,13 +3,14 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (persistent PreKey: second message before the peer replies is still type-2)
 ///
 /// @functions
 ///  - Full E2E: Alice and Bob initialize, create session, exchange 5 messages
 ///  - Group: 3 members, each sends a message, all receive all
 ///  - Mixed: 1:1 and group in same test
 ///  - SignalProtocolService full lifecycle
+library;
 
 import 'dart:convert';
 import 'dart:typed_data';

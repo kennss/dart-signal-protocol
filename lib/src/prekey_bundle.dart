@@ -1,17 +1,18 @@
 /// @file        prekey_bundle.dart
-/// @description PreKey 번들 생성 및 관리. X3DH 세션 수립을 위한 서명 프리키, 일회용 프리키 생성
+/// @description PreKey bundle generation and management: signed prekeys and one-time prekeys for X3DH session establishment
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-03-30
-/// @lastUpdated 2026-03-30
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-03-30
 ///
 /// @functions
-///  - PreKeyBundle: 서버 업로드용 PreKey 번들 데이터 클래스
-///  - SignedPreKey: 서명된 프리키 데이터 클래스 (키쌍 + 서명)
-///  - OneTimePreKey: 일회용 프리키 데이터 클래스
-///  - PreKeyGenerator.generateSignedPreKey(): 서명된 프리키 생성 (Ed25519 서명)
-///  - PreKeyGenerator.generateOneTimePreKeys(): 일회용 프리키 배치 생성
-///  - PreKeyGenerator.buildBundleForUpload(): 서버 업로드용 번들 JSON 빌드
+///  - PreKeyBundle: PreKey bundle data class (server upload)
+///  - SignedPreKey: Signed prekey data class (key pair + signature)
+///  - OneTimePreKey: One-time prekey data class
+///  - PreKeyGenerator.generateSignedPreKey(): Generate a signed prekey (Ed25519 signature)
+///  - PreKeyGenerator.generateOneTimePreKeys(): Generate a batch of one-time prekeys
+///  - PreKeyGenerator.buildBundleForUpload(): Build the bundle JSON for server upload
+library;
 
 import 'dart:typed_data';
 

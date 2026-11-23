@@ -5,11 +5,12 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-07
-/// @lastUpdated 2026-04-07
+/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-07
 ///
 /// @functions
 ///  - setSignalProtocolLogger(): register a callback to receive debug messages
 ///  - debugPrint(): no-op by default, forwards to callback if registered
+library;
 
 void Function(String message)? _debugLogCallback;
 
