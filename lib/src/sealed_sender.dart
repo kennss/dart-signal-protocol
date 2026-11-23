@@ -3,7 +3,10 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-11-10 (backport SnowChat c062a09: Step 9 comment — the identity cross-check is performed by SignalProtocolService.resolveSealedMessageType(); no code change; header translated to English)
+/// @lastUpdated 2026-11-23 (SealedSenderService takes the server keys pinned in the caller's
+///              build — trustedServerKeys, any of which may sign a certificate, validated as strict
+///              Ed25519 keys; no key is ever taken from the server at run time (SnowChat SC-06);
+///              English-only comments; library directive). Earlier 2026-11-10 (backport SnowChat c062a09: Step 9 comment — the identity cross-check is performed by SignalProtocolService.resolveSealedMessageType(); no code change; header translated to English)
 ///
 /// @functions
 ///  - SealedSenderService: Sealed Sender encryption/decryption service
@@ -19,6 +22,7 @@ import 'dart:typed_data';
 
 import 'package:pinenacl/x25519.dart' as nacl_api;
 
+import 'ed25519_strict.dart';
 import 'hkdf.dart' show hkdfDerive;
 import 'sender_certificate.dart';
 import 'x25519.dart';
@@ -182,11 +186,16 @@ class _ReplayCache {
 /// Only the recipient, who possesses the corresponding X25519 private key,
 /// can decrypt and learn who sent the message.
 class SealedSenderService {
-  /// Server's Ed25519 verify key (hardcoded in client binary).
-  ///
-  /// Used to verify SenderCertificate signatures during unseal.
-  /// This must match the server's signing key.
-  final Uint8List serverVerifyKey;
+  /// The server Ed25519 verify keys this build trusts to sign sender
+  /// certificates. They MUST be pinned in the application build (constants,
+  /// or configuration shipped with the binary) and NEVER taken from the
+  /// server at run time: a compromised server that could hand out its own
+  /// key could sign a certificate for any account and so impersonate any
+  /// sender. Several keys are accepted during a key rotation: ship a release
+  /// that trusts the current AND the next key, switch the server, then drop
+  /// the old key in a later release. A certificate signed by none of them is
+  /// rejected during unseal.
+  final List<Uint8List> trustedServerKeys;
 
   /// Replay detection cache.
   final _ReplayCache _replayCache = _ReplayCache();
@@ -194,9 +203,24 @@ class SealedSenderService {
   /// CSPRNG for padding.
   static final _rng = Random.secure();
 
+  /// Throws [ArgumentError] when [trustedServerKeys] is empty or holds a
+  /// key that is not a strict Ed25519 public key (32 bytes, canonical, not
+  /// of small order — see [isAcceptableEd25519PublicKey]).
   SealedSenderService({
-    required this.serverVerifyKey,
-  });
+    required List<Uint8List> trustedServerKeys,
+  }) : trustedServerKeys = List.unmodifiable(
+            trustedServerKeys.map((k) => Uint8List.fromList(k))) {
+    if (trustedServerKeys.isEmpty) {
+      throw ArgumentError('SealedSenderService: no trusted server key');
+    }
+    for (final key in trustedServerKeys) {
+      if (!isAcceptableEd25519PublicKey(key)) {
+        throw ArgumentError(
+            'SealedSenderService: a trusted server key is not a valid '
+            'Ed25519 public key');
+      }
+    }
+  }
 
   // -------------------------------------------------------------------------
   // seal()
@@ -419,7 +443,7 @@ class SealedSenderService {
     final SenderCertificate certificate;
     try {
       certificate = SenderCertificate.fromBytes(certBytes);
-      certificate.verify(serverVerifyKey);
+      certificate.verify(trustedServerKeys);
     } catch (_) {
       throw StateError('Sealed message rejected');
     }

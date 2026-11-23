@@ -138,7 +138,7 @@ void main() {
     test('valid certificate passes verify()', () {
       final cert = _createTestCert(serverKey: serverSigningKey);
       // Should not throw
-      cert.verify(serverVerifyKeyBytes);
+      cert.verify([serverVerifyKeyBytes]);
     });
 
     test('expired certificate fails verify()', () {
@@ -148,7 +148,7 @@ void main() {
       );
 
       expect(
-        () => cert.verify(serverVerifyKeyBytes),
+        () => cert.verify([serverVerifyKeyBytes]),
         throwsStateError,
       );
     });
@@ -162,7 +162,7 @@ void main() {
           Uint8List.fromList(wrongKey.verifyKey.toList());
 
       expect(
-        () => cert.verify(wrongVerifyKey),
+        () => cert.verify([wrongVerifyKey]),
         throwsStateError,
       );
     });
@@ -176,7 +176,7 @@ void main() {
 
       final tampered = SenderCertificate.fromBytes(bytes);
       expect(
-        () => tampered.verify(serverVerifyKeyBytes),
+        () => tampered.verify([serverVerifyKeyBytes]),
         throwsStateError,
       );
     });

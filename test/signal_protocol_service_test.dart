@@ -358,8 +358,8 @@ void main() {
         () async {
       final serverKey = ed.SigningKey.generate();
       final serverVerify = Uint8List.fromList(serverKey.verifyKey.toList());
-      final sealer = SealedSenderService(serverVerifyKey: serverVerify);
-      final unsealer = SealedSenderService(serverVerifyKey: serverVerify);
+      final sealer = SealedSenderService(trustedServerKeys: [serverVerify]);
+      final unsealer = SealedSenderService(trustedServerKeys: [serverVerify]);
 
       final m = await _send(alice, 'bob', 'hello new contact');
       final envelope = sealer.seal(

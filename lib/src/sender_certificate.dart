@@ -3,15 +3,17 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-11-23 (verify() is strict Ed25519 — a malleated server signature or a
-///              small-order server key is refused; English-only comments; library directive).
+/// @lastUpdated 2026-11-23 (verify() takes the trusted key list pinned in the caller's build and
+///              accepts a signature of any of them — key rotation, SnowChat SC-06; strict Ed25519 —
+///              a malleated server signature or a small-order server key is refused; English-only
+///              comments; library directive).
 ///              Earlier 2026-04-20
 ///
 /// @functions
 ///  - SenderCertificate: Sender certificate data class (fixed 177 bytes)
 ///  - SenderCertificate.toBytes(): Serialize the certificate to 177 bytes
 ///  - SenderCertificate.fromBytes(): Deserialize a certificate from 177 bytes
-///  - SenderCertificate.verify(): Ed25519 signature verification + expiry check
+///  - SenderCertificate.verify(trustedServerKeys): strict Ed25519 signature (any trusted key) + expiry check
 ///  - SenderCertificate.isExpired: Whether the certificate has expired
 library;
 
@@ -215,16 +217,18 @@ class SenderCertificate {
   // Verification
   // -------------------------------------------------------------------------
 
-  /// Verify this certificate against the server's Ed25519 verify key.
+  /// Verify this certificate against the server keys this build trusts
+  /// ([trustedServerKeys] — pinned in the build, never fetched at run time;
+  /// several during a key rotation).
   ///
   /// Checks in order (all must pass):
   /// 1. Version == 0x01
   /// 2. Not expired
-  /// 3. Ed25519 signature over bytes [0..112] is valid (strict: S < L, the
-  ///    key is canonical and not of small order)
+  /// 3. Ed25519 signature over bytes [0..112] is valid under ONE of the keys
+  ///    (strict: S < L, the key is canonical and not of small order)
   ///
   /// Throws [StateError] on any verification failure with a descriptive message.
-  void verify(Uint8List serverVerifyKey) {
+  void verify(List<Uint8List> trustedServerKeys) {
     // 1. Version check
     if (version != _certVersion) {
       throw StateError(
@@ -249,9 +253,13 @@ class SenderCertificate {
       0,
       _signedPortionLength,
     );
-    if (!verifyEd25519Strict(serverVerifyKey, signedPortion, serverSignature)) {
-      throw StateError('SenderCertificate server signature verification failed');
+    for (final key in trustedServerKeys) {
+      if (verifyEd25519Strict(key, signedPortion, serverSignature)) return;
     }
+    throw StateError(
+      'SenderCertificate server signature verification failed '
+      '(no trusted key signed it)',
+    );
   }
 
   @override

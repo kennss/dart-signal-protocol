@@ -6,13 +6,15 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-11-10
-/// @lastUpdated 2026-11-10
+/// @lastUpdated 2026-11-23 (testSenderCertificate(): a server-signed certificate for a party)
+///              Earlier 2026-11-10
 ///
 /// @functions
 ///  - TestParty.create(): account key + Signal identity + store for one user
 ///  - TestParty.bindingFor(): sign an Identity Binding v1 with the account key
 ///  - TestParty.bundle(): a decoded prekey bundle as createSession expects it
 ///  - TestParty.localBinding(): LocalIdentityBinding for type-2 embedding
+///  - testSenderCertificate(): a sender certificate for a party, signed by a test server key
 ///  - hexBytes(): hex decoding helper
 library;
 
@@ -142,4 +144,20 @@ class TestParty {
       if (accountPublicKey != null) 'accountPublicKey': accountPublicKey,
     };
   }
+}
+
+/// A Sealed Sender certificate for [party] (its peer id, device and X25519
+/// identity key), valid for an hour and signed by [server].
+SenderCertificate testSenderCertificate(ed.SigningKey server, TestParty party) {
+  final unsigned = SenderCertificate(
+    version: 1,
+    senderSnowchatId: party.peerId,
+    senderDeviceId: party.deviceId,
+    senderIdentityKey: party.identityKey,
+    expiryMs: DateTime.now().millisecondsSinceEpoch + 3600 * 1000,
+    serverSignature: Uint8List(64),
+  );
+  final signed = Uint8List.sublistView(unsigned.toBytes(), 0, 113);
+  final sig = Uint8List.fromList(server.sign(signed).signature);
+  return SenderCertificate.fromBytes(Uint8List.fromList([...signed, ...sig]));
 }

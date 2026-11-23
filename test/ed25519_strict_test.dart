@@ -193,12 +193,12 @@ void main() {
           ed.SigningKey(seed: Uint8List.fromList(List.filled(32, 0x51)));
       final serverPub = Uint8List.fromList(server.verifyKey);
       final cert = signedCert(server);
-      cert.verify(serverPub);
+      cert.verify([serverPub]);
       final mal = withSignature(cert, _malleate(cert.serverSignature));
       final signedPortion = Uint8List.sublistView(mal.toBytes(), 0, 113);
       expect(
           _plainVerify(serverPub, signedPortion, mal.serverSignature), isTrue);
-      expect(() => mal.verify(serverPub), throwsStateError);
+      expect(() => mal.verify([serverPub]), throwsStateError);
     });
 
     test('a small-order "server key" with a universal forgery is refused', () {
@@ -209,7 +209,7 @@ void main() {
       expect(
           _plainVerify(_identityPoint, signedPortion, forged.serverSignature),
           isTrue);
-      expect(() => forged.verify(_identityPoint), throwsStateError);
+      expect(() => forged.verify([_identityPoint]), throwsStateError);
     });
   });
 }

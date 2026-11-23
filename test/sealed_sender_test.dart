@@ -88,9 +88,9 @@ void main() {
         Uint8List.fromList(serverSigningKey.verifyKey.toList());
     recipientIK = X25519KeyPair.generate();
 
-    senderService = SealedSenderService(serverVerifyKey: serverVerifyKeyBytes);
+    senderService = SealedSenderService(trustedServerKeys: [serverVerifyKeyBytes]);
     recipientService =
-        SealedSenderService(serverVerifyKey: serverVerifyKeyBytes);
+        SealedSenderService(trustedServerKeys: [serverVerifyKeyBytes]);
   });
 
   group('Sealed Sender — seal/unseal round-trip', () {
@@ -301,8 +301,9 @@ void main() {
       // Recipient service with wrong server key
       final wrongServerKey = ed.SigningKey.generate();
       final wrongService = SealedSenderService(
-        serverVerifyKey:
-            Uint8List.fromList(wrongServerKey.verifyKey.toList()),
+        trustedServerKeys: [
+          Uint8List.fromList(wrongServerKey.verifyKey.toList()),
+        ],
       );
 
       expect(
