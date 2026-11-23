@@ -3,7 +3,7 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-11
-/// @lastUpdated 2026-11-23 (verify() takes the trusted key list pinned in the caller's build and
+/// @lastUpdated 2026-11-23 (toString() names no account or device — SnowChat logRef; verify() takes the trusted key list pinned in the caller's build and
 ///              accepts a signature of any of them — key rotation, SnowChat SC-06; strict Ed25519 —
 ///              a malleated server signature or a small-order server key is refused; English-only
 ///              comments; library directive).
@@ -262,10 +262,12 @@ class SenderCertificate {
     );
   }
 
+  /// No full sender id or device id: a certificate printed into a log or a
+  /// crash report must not name the account (the point of Sealed Sender).
   @override
   String toString() =>
-      'SenderCertificate(v$version, sender=$senderSnowchatId, '
-      'device=$senderDeviceId, '
+      'SenderCertificate(v$version, sender=${_logRef(senderSnowchatId)}, '
+      'device=${_logRef(senderDeviceId)}, '
       'expiry=${DateTime.fromMillisecondsSinceEpoch(expiryMs).toIso8601String()})';
 }
 
@@ -299,3 +301,8 @@ int _getUint64BE(Uint8List buffer, int offset) {
       (buffer[offset + 6] << 8) |
       buffer[offset + 7];
 }
+
+/// A short, non-identifying reference for a log line: the first 8 and the
+/// last 4 characters of [id].
+String _logRef(String id) =>
+    id.length <= 12 ? '***' : '${id.substring(0, 8)}...${id.substring(id.length - 4)}';

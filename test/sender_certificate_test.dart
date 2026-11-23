@@ -3,7 +3,8 @@
 /// @author      Kennt Kim
 /// @company     Calida Lab
 /// @created     2026-04-10
-/// @lastUpdated 2026-11-23 (English-only comments; library directive; analyzer clean). Earlier 2026-04-10
+/// @lastUpdated 2026-11-23 (verify() takes the trusted key list; toString() redaction;
+///              English-only comments; library directive). Earlier 2026-04-10
 ///
 /// @functions
 ///  - Serialize -> deserialize round-trip (177 bytes)
@@ -12,6 +13,7 @@
 ///  - Wrong server key -> verify fails
 ///  - Truncated bytes -> rejection
 ///  - Field length validation (snowchatId != 36 bytes -> error)
+///  - toString() names no account / device; trusted key list semantics
 library;
 
 import 'dart:typed_data';
@@ -268,6 +270,26 @@ void main() {
         expiryMs: DateTime.now().millisecondsSinceEpoch + 3600000,
       );
       expect(cert.isExpired, isFalse);
+    });
+  });
+
+  group('SenderCertificate — logging', () {
+    test('toString names neither the full sender id nor the device id', () {
+      final cert = _createTestCert(serverKey: serverSigningKey);
+      final text = cert.toString();
+      expect(text, isNot(contains(cert.senderSnowchatId)));
+      expect(text, isNot(contains(cert.senderDeviceId)));
+    });
+  });
+
+  group('SenderCertificate — trusted key list', () {
+    test('a signature of any listed key verifies; an empty list never does',
+        () {
+      final cert = _createTestCert(serverKey: serverSigningKey);
+      final other = Uint8List.fromList(ed.SigningKey.generate().verifyKey);
+      cert.verify([other, serverVerifyKeyBytes]);
+      expect(() => cert.verify([other]), throwsStateError);
+      expect(() => cert.verify(const []), throwsStateError);
     });
   });
 }
